@@ -1,6 +1,13 @@
 # Exclusions requested
 **/thumbnails/**
+**/thumbs/**
 **/pngs/**
+*.fits
+ATLAS_TRANSIENTS/
+Good_obj/
+store/app.db
+store/cache/
+store/model/
 
 # Python
 __pycache__/

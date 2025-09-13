@@ -1,0 +1,746 @@
+
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>HOSHINA</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <link rel="stylesheet" href="assets/style.css">
+</head>
+<body>
+  <header>
+    <button id="theme-toggle" class="theme-toggle" title="Toggle theme">🌙</button>
+    
+    <!-- Main Header Row -->
+    <div class="header-main">
+      <div class="header-brand">
+        <h1>🏷️ HOSHINA</h1>
+      </div>
+      
+      <!-- Status & Progress -->
+      <div class="header-status">
+        <div class="page-indicator" id="page-indicator" style="display: none;">
+          <span class="page-text">Page <strong id="current-page">1</strong> of <strong id="total-pages">1</strong></span>
+        </div>
+        <div class="progress-container">
+          <div class="progress-bar" id="progress-bar">0%</div>
+        </div>
+        <div class="status" id="status"></div>
+      </div>
+    </div>
+    
+    <!-- Horizontal Category Navigation -->
+    <div class="header-nav-categories">
+      <!-- Data & Loading Category -->
+      <div class="nav-category-dropdown">
+        <button class="category-toggle" data-category="data">📂 Data & Loading ▼</button>
+        <div class="category-dropdown" id="data-dropdown">
+          <input id="data-dir-input" type="text" placeholder="Data path..." class="dropdown-input" />
+          <div style="display:flex; align-items:center; gap:8px; flex-wrap:wrap;">
+            <button id="apply-data-dir" class="dropdown-btn">📁 Set Directory</button>
+            <button id="ingest-data-dir" class="dropdown-btn primary">🔄 Ingest Data</button>
+            <label>Max groups
+              <input id="apply-max-groups" type="number" min="1" placeholder="e.g., 10000" style="width:110px;" />
+            </label>
+            <label class="checkbox-label">
+              <input id="apply-require-all" type="checkbox" checked>
+              <span class="checkmark"></span>
+              Require all roles
+            </label>
+            <label class="checkbox-label">
+              <input id="apply-generate-pngs" type="checkbox" checked>
+              <span class="checkmark"></span>
+              Generate full-res PNGs (used for thumbnails & training)
+            </label>
+          </div>
+          
+          <div style="margin-top:8px; border-top:1px solid var(--border-color); padding-top:8px;">
+            <button id="start-fresh" class="dropdown-btn danger">🧹 Start Fresh (wipe all data & caches)</button>
+          </div>
+          <div style="margin-top:8px; border-top:1px solid var(--border-color); padding-top:8px;">
+            <h4 style="margin:0 0 6px 0; font-size:13px; color:var(--text-secondary);">Triplet Recognition Config (auto-saves)</h4>
+            <div style="display:grid; gap:6px;">
+              <textarea id="grouping-json" class="dropdown-textarea" placeholder='{"roles":["target","ref","diff"],"suffix_map":{"target":["_target.fits"],"ref":["_ref.fits"],"diff":["_diff.fits"]},"require_all_roles":true,"unit_size":3}' rows="4"></textarea>
+              <div style="font-size:11px; color:var(--text-secondary); text-align:center;">
+                Changes are automatically saved when you ingest data
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+      
+      <!-- Dataset & Analysis Category -->
+      <div class="nav-category-dropdown">
+        <button class="category-toggle" data-category="analysis">📊 Dataset & Analysis ▼</button>
+        <div class="category-dropdown" id="analysis-dropdown">
+          <button id="stats" class="dropdown-btn">📊 View Stats</button>
+          <button id="classes" class="dropdown-btn">🏷️ Manage Classes</button>
+          <button id="import-folder-labeled" class="dropdown-btn">📁 Import Folder as Class</button>
+        </div>
+      </div>
+      
+      <!-- View Mode Category -->
+      <div class="nav-category-dropdown">
+        <button class="category-toggle" data-category="view">👀 View Mode ▼</button>
+        <div class="category-dropdown" id="view-dropdown">
+          <button id="view-mode-grid" class="dropdown-btn">🧩 Grid View</button>
+          <button id="view-mode-single" class="dropdown-btn">🎯 Single View</button>
+        </div>
+      </div>
+      
+      <!-- Training Category -->
+      <div class="nav-category-dropdown">
+        <button class="category-toggle" data-category="training">🧠 Training ▼</button>
+        <div class="category-dropdown" id="training-dropdown">
+          <button id="retrain" class="dropdown-btn retrain">🔄 Retrain Model</button>
+          <button id="train-tf" class="dropdown-btn">🧠 TF Train</button>
+        </div>
+      </div>
+      
+      <!-- Smart Suggestions Category -->
+      <div class="nav-category-dropdown">
+        <button class="category-toggle" data-category="suggestions">🎯 Smart Suggestions ▼</button>
+        <div class="category-dropdown" id="suggestions-dropdown">
+          <button id="smart-uncertain" class="dropdown-btn">🤔 Uncertain</button>
+          <button id="smart-diverse" class="dropdown-btn">🎯 Diverse</button>
+          <button id="smart-odd" class="dropdown-btn">🔍 Oddities</button>
+          <button id="smart-borderline" class="dropdown-btn">⚖️ Borderline</button>
+          <button id="smart-all" class="dropdown-btn">📁 All</button>
+        </div>
+      </div>
+      
+      <!-- Tools & Help Category -->
+      <div class="nav-category-dropdown">
+        <button class="category-toggle" data-category="tools">🛠️ Tools ▼</button>
+        <div class="category-dropdown" id="tools-dropdown">
+          <div class="search-controls">
+            <div class="search-box">
+              <input type="text" id="search-input" placeholder="🔍 Search files..." />
+              <button id="search-clear" class="search-clear" style="display: none;">✕</button>
+            </div>
+            <select id="label-filter">
+              <option value="">All Labels</option>
+              <option value="labeled">Labeled Only</option>
+              <option value="unlabeled">Unlabeled Only</option>
+              <option value="unsure">Unsure</option>
+              <option value="skipped">Skipped</option>
+            </select>
+          </div>
+          <button id="bulk-ops" class="dropdown-btn">⚡ Bulk Operations</button>
+          <button id="map" class="dropdown-btn">🗺️ View Map</button>
+          <button id="help" class="dropdown-btn" title="Show keyboard shortcuts">❓ Help</button>
+        </div>
+      </div>
+    </div>
+    
+    
+    <!-- Probability Band Controls (initially hidden) -->
+    <div class="header-probability-band" id="header-probability-band" style="display: none;">
+      <span class="band-label">Probability Band:</span>
+      <input type="number" id="low" placeholder="0.3" step="0.01" value="0.3" min="0" max="1">
+      <span>to</span>
+      <input type="number" id="high" placeholder="0.8" step="0.01" value="0.8" min="0" max="1">
+      <button id="pull" class="primary-btn">Apply</button>
+    </div>
+    
+    <!-- Status Row for Data and Thumbnail Operations -->
+    <div class="header-status-row" id="header-status-row" style="display: none;">
+      <div id="data-dir-current" class="status-info"></div>
+      <span id="thumb-build-status" class="status-info"></span>
+    </div>
+    
+    <!-- Batch Controls -->
+    <div id="batch-controls" class="batch-controls" style="display: none;">
+      <div class="batch-info">
+        <span class="batch-icon">✅</span>
+        <span id="selected-count">0</span> items selected
+      </div>
+      <div class="batch-actions">
+        <div class="batch-class-buttons" id="batch-class-buttons">
+          <!-- Class buttons will be populated dynamically -->
+        </div>
+        <div class="batch-control-buttons">
+          <button id="select-all" class="batch-btn">Select All</button>
+          <button id="select-none" class="batch-btn">Clear</button>
+          <button id="batch-unsure" class="batch-btn unsure">❓ Mark Unsure</button>
+          <button id="batch-skip" class="batch-btn skip">⏭️ Skip</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Click-cycling Assignment Controls -->
+    <div id="assignment-controls" class="assignment-controls">
+      <div class="assign-row">
+        <div class="assign-actions">
+          <button id="apply-assignments" class="primary-btn">Apply assignments</button>
+          <button id="clear-assignments" class="batch-btn">Clear assignments</button>
+        </div>
+        <div class="assign-hint" id="assign-hint-top"></div>
+      </div>
+    </div>
+  </header>
+
+  <main>
+    <!-- Main App Content -->
+    <div id="main-content">
+
+      
+      <div id="grid" class="grid"></div>
+      <div id="single-view" class="single-view" style="display:none;">
+        <div class="single-inner">
+          <div class="single-image">
+            <img id="single-img" alt="item" />
+          </div>
+          <div class="single-meta">
+            <div id="single-filename"></div>
+            <div id="single-pred"></div>
+          </div>
+          <div class="single-actions">
+            <div id="single-class-buttons" class="single-class-buttons"></div>
+            <div class="single-aux-buttons">
+              <button id="single-prev" class="batch-btn">⬅️ Prev</button>
+              <button id="single-next" class="batch-btn">Next ➡️</button>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Training Dashboard Page -->
+    <div id="training-dashboard" class="training-dashboard hidden" style="display:none;">
+      <div class="training-header">
+        <div class="training-nav">
+          <button id="back-to-main" class="nav-btn">⬅️ Back to Labeling</button>
+          <h1>🧠 TensorFlow Training Dashboard</h1>
+          <button id="open-model-builder" class="secondary-btn" style="margin-left:12px;">🧩 Model Builder</button>
+        </div>
+        <div class="training-status-bar">
+          <div class="status-info">
+            <span id="train-status-text">Ready to Train</span>
+            <div class="status-indicator" id="train-status-indicator"></div>
+          </div>
+          <div class="device-info" id="train-device-info"></div>
+          <button id="return-to-labeling" class="primary-btn" style="display:none; margin-left:12px;">⬅️ Return to Main (show predictions)</button>
+        </div>
+      </div>
+
+      <div class="training-content">
+        <!-- Configuration Panel -->
+        <div class="training-section config-panel">
+          <div class="section-header">
+            <h2>⚙️ Training Configuration</h2>
+            <button id="load-preset" class="secondary-btn">📁 Load Preset</button>
+          </div>
+          <div class="config-grid">
+            <div class="config-group">
+              <label for="train-model">Model Architecture</label>
+              <select id="train-model" class="config-select">
+                <option value="mobilenet_v2">MobileNetV2 (Fast, Efficient)</option>
+                <option value="efficientnet_b0">EfficientNetB0 (Balanced)</option>
+                <option value="resnet50">ResNet50 (Powerful)</option>
+                <option value="custom">Custom (Model Builder)</option>
+              </select>
+              <div class="config-hint">Choose based on your speed vs accuracy needs</div>
+            </div>
+            
+            <div class="config-group">
+              <label for="train-input-mode">Input Mode</label>
+              <select id="train-input-mode" class="config-select">
+                <option value="single">Single Image</option>
+                <option value="triplet">Triplet (Target/Ref/Diff)</option>
+              </select>
+              <div class="config-hint">Triplet mode for astronomical difference images</div>
+            </div>
+
+            <div class="config-group" id="single-role-group" style="display:none;">
+              <label for="single-role">Single Image Source</label>
+              <select id="single-role" class="config-select">
+                <option value="target">Target</option>
+                <option value="ref">Ref</option>
+                <option value="diff">Diff</option>
+              </select>
+              <div class="config-hint">When using Single Image mode, choose which member role to use.</div>
+            </div>
+            
+            <div class="config-group">
+              <label for="train-epochs">Training Epochs</label>
+              <input id="train-epochs" type="range" min="1" max="50" value="3" class="config-slider">
+              <div class="slider-value"><span id="epochs-value">3</span> epochs</div>
+              <div class="config-hint">More epochs = better training but longer time</div>
+            </div>
+            
+            <div class="config-group">
+              <label for="train-batch-size">Batch Size</label>
+              <input id="train-batch-size" type="range" min="4" max="256" value="32" step="4" class="config-slider">
+              <div class="slider-value"><span id="batch-size-value">32</span> images</div>
+              <div class="config-hint">Higher batch size needs more GPU memory</div>
+            </div>
+            
+            <div class="config-group">
+              <label for="train-learning-rate">Learning Rate</label>
+              <select id="train-learning-rate" class="config-select">
+                <option value="0.001">0.001 (Default)</option>
+                <option value="0.01">0.01 (Fast)</option>
+                <option value="0.0001">0.0001 (Conservative)</option>
+              </select>
+              <div class="config-hint">How fast the model learns</div>
+            </div>
+            
+            <div class="config-group">
+              <label class="checkbox-label">
+                <input id="train-augment" type="checkbox">
+                <span class="checkmark"></span>
+                Data Augmentation
+              </label>
+              <div class="config-hint">Randomly transform images to improve generalization</div>
+            </div>
+
+            <div class="config-group">
+              <label for="train-split">Train/Val Split</label>
+              <input id="train-split" type="range" min="50" max="95" value="85" class="config-slider">
+              <div class="slider-value"><span id="train-split-value">85</span>% train</div>
+              <div class="config-hint">Percentage of data used for training; remainder for validation</div>
+            </div>
+
+            <div class="config-group">
+              <label for="split-strategy">Split Strategy</label>
+              <select id="split-strategy" class="config-select">
+                <option value="natural" selected>Natural (as-is)</option>
+                <option value="stratified">Stratified (preserve ratios)</option>
+                <option value="balanced">Balanced (equal per class)</option>
+              </select>
+              <div class="config-hint">How to form train/val sets across classes</div>
+            </div>
+          </div>
+          
+          <div class="dataset-summary">
+            <h3>📊 Dataset Summary</h3>
+            <div class="summary-grid" id="dataset-summary">
+              <div class="summary-item">
+                <span class="summary-label">Total Images</span>
+                <span class="summary-value" id="total-images">-</span>
+              </div>
+              <div class="summary-item">
+                <span class="summary-label">Labeled</span>
+                <span class="summary-value" id="labeled-images">-</span>
+              </div>
+              <div class="summary-item">
+                <span class="summary-label">Classes</span>
+                <span class="summary-value" id="num-classes">-</span>
+              </div>
+              <div class="summary-item">
+                <span class="summary-label">Examples per Class</span>
+                <span class="summary-value" id="examples-per-class">-</span>
+              </div>
+              <div class="summary-item">
+                <span class="summary-label">Training Split</span>
+                <span class="summary-value" id="train-split">85%</span>
+              </div>
+            </div>
+          </div>
+
+          <div class="config-group" style="margin-top: 1rem;">
+            <label>Label Mapping</label>
+            <div id="label-mapping-list" class="label-mapping-list"></div>
+            <div class="config-hint">Enable labels to include in training and set their numeric targets.</div>
+          </div>
+        </div>
+
+        <!-- Training Progress -->
+        <div class="training-section progress-panel">
+          <div class="section-header">
+            <h2>🚀 Training Progress</h2>
+            <div class="training-controls">
+              <button id="start-training" class="primary-btn">▶️ Start Training</button>
+              <button id="pause-training" class="secondary-btn" disabled>⏸️ Pause</button>
+              <button id="stop-training" class="danger-btn" disabled>⏹️ Stop</button>
+            </div>
+          </div>
+          
+          <div class="progress-overview">
+            <div class="progress-item">
+              <div class="progress-label">Overall Progress</div>
+              <div class="progress-bar-container">
+                <div class="progress-bar" id="overall-progress">0%</div>
+              </div>
+              <div class="progress-text">Epoch <span id="current-epoch">0</span> of <span id="total-epochs">0</span></div>
+            </div>
+            
+            <div class="progress-item">
+              <div class="progress-label">Current Epoch</div>
+              <div class="progress-bar-container">
+                <div class="progress-bar" id="epoch-progress">0%</div>
+              </div>
+              <div class="progress-text">Step <span id="current-step">0</span> of <span id="total-steps">0</span></div>
+            </div>
+            
+            <div class="progress-item time-item">
+              <div class="progress-label">Time Remaining</div>
+              <div class="time-estimate" id="time-remaining">--:--</div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Metrics Dashboard -->
+        <div class="training-section metrics-panel">
+          <div class="section-header">
+            <h2>📈 Training Metrics</h2>
+            <div class="metrics-controls">
+              <button id="export-metrics" class="secondary-btn">📊 Export Data</button>
+              <button id="reset-charts" class="secondary-btn">🔄 Reset Charts</button>
+            </div>
+          </div>
+          
+          <div class="metrics-grid">
+            <div class="metric-card">
+              <h3>Loss (Train vs Val)</h3>
+              <div class="metric-value"><span id="current-loss">-</span> / <span id="current-val-loss">-</span></div>
+              <canvas id="loss-combined-chart" width="800" height="300"></canvas>
+            </div>
+            
+            <div class="metric-card">
+              <h3>Accuracy (Train vs Val)</h3>
+              <div class="metric-value"><span id="current-accuracy">-</span> / <span id="current-val-accuracy">-</span></div>
+              <canvas id="acc-combined-chart" width="800" height="300"></canvas>
+            </div>
+          </div>
+          
+          <div class="metrics-summary">
+            <div class="summary-row">
+              <div class="summary-metric">
+                <span class="metric-label">Best Validation Accuracy</span>
+                <span class="metric-value highlight" id="best-val-acc">-</span>
+              </div>
+              <div class="summary-metric">
+                <span class="metric-label">Learning Rate</span>
+                <span class="metric-value" id="current-lr">-</span>
+              </div>
+              <div class="summary-metric">
+                <span class="metric-label">GPU Utilization</span>
+                <span class="metric-value" id="gpu-util">-</span>
+              </div>
+              <div class="summary-metric">
+                <span class="metric-label">Memory Usage</span>
+                <span class="metric-value" id="memory-usage">-</span>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Prediction Panel -->
+        <div class="training-section prediction-panel">
+          <div class="section-header">
+            <h2>📊 Predict Unlabeled Images</h2>
+          </div>
+          <div class="predict-grid">
+            <div class="predict-summary">
+              <div>Remaining to predict: <strong id="pred-remaining">-</strong></div>
+              <div>Already predicted: <strong id="pred-done">-</strong> / <span id="pred-total">-</span></div>
+              <div class="predict-actions">
+                <button id="run-predict" class="primary-btn">▶️ Predict</button>
+                <label style="margin-left:12px;">Batch size</label>
+                <input id="predict-limit" type="number" min="1" value="300" style="width:90px; margin-left:6px;">
+                <label class="checkbox-label" style="margin-left:12px;">
+                  <input id="predict-all-remaining" type="checkbox">
+                  <span class="checkmark"></span>
+                  All remaining
+                </label>
+                <label class="checkbox-label" style="margin-left:12px;">
+                  <input id="predict-repredict-all" type="checkbox">
+                  <span class="checkmark"></span>
+                  Recompute all
+                </label>
+              </div>
+            </div>
+            <div class="predict-vis">
+              <div class="predict-hist-row">
+                <div class="histogram-col">
+                  <canvas id="pred-train-canvas" width="640" height="200"></canvas>
+                  <div class="hist-caption">Unlabeled predictions</div>
+                </div>
+                <div class="histogram-col">
+                  <canvas id="pred-test-canvas" width="640" height="200"></canvas>
+                  <div class="hist-caption">Test set (by true label)</div>
+                  <div id="pred-test-legend" class="hist-legend"></div>
+                </div>
+              </div>
+              <div class="threshold-row">
+                <label for="pred-threshold">Decision threshold</label>
+                <input id="pred-threshold" type="range" min="0" max="1" step="0.01" value="0.50">
+                <span id="pred-threshold-value">0.50</span>
+                <button id="apply-threshold" class="action-btn" style="margin-left:12px;">✅ Apply Threshold</button>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Model Management -->
+        <div class="training-section">
+          <div class="section-header">
+            <h2>💾 Model Management</h2>
+          </div>
+          
+          <div class="model-actions">
+            <div class="model-group">
+              <h3>Current Model</h3>
+              <div class="model-info">
+                <div class="model-detail">
+                  <span class="detail-label">Architecture:</span>
+                  <span class="detail-value" id="current-model-arch">-</span>
+                </div>
+                <div class="model-detail">
+                  <span class="detail-label">Parameters:</span>
+                  <span class="detail-value" id="current-model-params">-</span>
+                </div>
+                <div class="model-detail">
+                  <span class="detail-label">Last Trained:</span>
+                  <span class="detail-value" id="current-model-date">-</span>
+                </div>
+              </div>
+              <div class="model-buttons">
+                <button id="save-model" class="secondary-btn">💾 Save Model</button>
+                <button id="export-model" class="secondary-btn">📤 Export</button>
+                <button id="test-model" class="secondary-btn">🧪 Test</button>
+              </div>
+            </div>
+            
+            <div class="model-group">
+              <h3>Model History</h3>
+              <div class="model-history" id="model-history">
+                <div class="history-item">
+                  <span class="history-name">No saved models</span>
+                </div>
+              </div>
+              <div class="model-buttons">
+                <button id="load-model" class="secondary-btn">📁 Load Model</button>
+                <button id="compare-models" class="secondary-btn">⚖️ Compare</button>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Training Logs -->
+        <div class="training-section">
+          <div class="section-header">
+            <h2>📝 Training Logs</h2>
+            <div class="log-controls">
+              <button id="clear-logs" class="secondary-btn">🗑️ Clear</button>
+              <button id="export-logs" class="secondary-btn">📄 Export</button>
+              <label class="checkbox-label">
+                <input id="auto-scroll-logs" type="checkbox" checked>
+                <span class="checkmark"></span>
+                Auto-scroll
+              </label>
+            </div>
+          </div>
+          
+          <div class="logs-container">
+            <div class="log-output" id="training-logs">
+              <div class="log-entry">
+                <span class="log-time">[Ready]</span>
+                <span class="log-message">Training dashboard initialized. Configure your model and click Start Training.</span>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+    
+    <!-- Bottom Apply Assignments -->
+    <div id="bottom-assignment-controls" class="assignment-controls">
+      <div class="assign-row">
+        <div class="assign-actions">
+          <button id="apply-assignments-bottom" class="primary-btn">Apply assignments</button>
+        </div>
+        <div class="assign-hint" id="assign-hint-bottom"></div>
+        <div class="assign-actions ralign" id="page-assign-inline"><!-- Entire Page buttons go here --></div>
+      </div>
+    </div>
+
+    <!-- Bottom Pagination -->
+    <div id="bottom-pagination" class="pagination-controls bottom-pagination" style="display: none;">
+      <div class="pagination-info">
+        <span id="bottom-pagination-info">Showing items</span>
+      </div>
+      <div class="pagination-mid-controls">
+        <div class="quick-controls">
+          <div class="quick-control-group">
+            <label>Page Size</label>
+            <select id="pageSize">
+              <option value="12">12</option>
+              <option value="24">24</option>
+              <option value="36">36</option>
+              <option value="48">48</option>
+              <option value="60" selected>60</option>
+            </select>
+          </div>
+          <div class="quick-control-group">
+            <label>Size</label>
+            <select id="tileSize">
+              <option value="small">🔸 Small</option>
+              <option value="medium">🔹 Medium</option>
+              <option value="large">🔶 Large</option>
+              <option value="xlarge" selected>🔷 X-Large</option>
+            </select>
+          </div>
+        </div>
+      </div>
+      <div class="pagination-buttons">
+        <button id="bottom-first-page" class="pagination-btn" disabled>⏮️ First</button>
+        <button id="bottom-prev-page" class="pagination-btn" disabled>⬅️ Previous</button>
+        <button id="bottom-next-page" class="pagination-btn" disabled>Next ➡️</button>
+        <button id="bottom-last-page" class="pagination-btn" disabled>Last ⏭️</button>
+      </div>
+    </div>
+  </main>
+
+  <!-- Classes Modal -->
+  <div id="classesModal" class="modal hidden">
+    <div class="modal-content">
+      <h2>Classes</h2>
+      <div id="classList"></div>
+      <div class="assign-hint" style="margin-top:6px;">Tip: Choose a color for each class. Colors are saved locally.</div>
+      <button id="addClass">Add class</button>
+      <div class="modal-actions">
+        <button id="saveClasses">Save</button>
+        <button id="closeClasses">Close</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Map Modal -->
+  <div id="mapModal" class="modal hidden">
+    <div class="modal-content large">
+      <h2>Embedding Map (UMAP)</h2>
+      <canvas id="mapCanvas" width="800" height="600"></canvas>
+      <div class="modal-actions">
+        <button id="closeMap">Close</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Stats Modal -->
+  <div id="statsModal" class="modal hidden">
+    <div class="modal-content large">
+      <h2>📊 Dataset Statistics</h2>
+      <div id="stats-content" class="stats-grid">
+        <!-- Stats content will be populated dynamically -->
+      </div>
+      <div class="modal-actions">
+        <button id="refreshStats" class="primary-btn">🔄 Refresh</button>
+        <button id="closeStats">Close</button>
+      </div>
+    </div>
+  </div>
+
+
+  
+
+  <!-- Import Folder Labeled Modal -->
+  <div id="importFolderModal" class="modal hidden">
+    <div class="modal-content">
+      <h2>📁 Import Folder as Class</h2>
+      <div style="display:grid; grid-template-columns: 1fr; gap:8px;">
+        <label>Folder path
+          <input id="ifl-folder" type="text" placeholder="C:/path/to/folder" />
+        </label>
+        <label>Class name
+          <input id="ifl-class" type="text" placeholder="e.g., Real" />
+        </label>
+        <label class="checkbox-label">
+          <input id="ifl-triplets" type="checkbox" checked>
+          <span class="checkmark"></span>
+          Create composite thumbnails (per grouping)
+        </label>
+        
+        <label class="checkbox-label">
+          <input id="ifl-require-all" type="checkbox" checked>
+          <span class="checkmark"></span>
+          Require all roles (complete groups only)
+        </label>
+        <label>Max groups (optional)
+          <input id="ifl-max-groups" type="number" min="1" placeholder="e.g., 10000" />
+        </label>
+      </div>
+      <div id="ifl-status" class="import-status" style="display:none;"></div>
+      <div class="modal-actions">
+        <button id="ifl-run" class="primary-btn">Import</button>
+        <button id="ifl-close">Close</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Bulk Operations Modal -->
+  <div id="bulkOpsModal" class="modal hidden">
+    <div class="modal-content large">
+      <h2>⚡ Bulk Operations</h2>
+      <div class="bulk-ops-sections">
+        <div class="bulk-section">
+          <h3>📤 Export Data</h3>
+          <p>Export your labeled dataset and model artifacts</p>
+          <div class="bulk-actions">
+            <button id="export-labels" class="bulk-action-btn">📋 Export Labels (CSV)</button>
+            <button id="export-full" class="bulk-action-btn">📦 Export Full Dataset (ZIP)</button>
+            <button id="export-model" class="bulk-action-btn">🧠 Export Model Artifacts</button>
+          </div>
+        </div>
+        
+        <div class="bulk-section">
+          <h3>📥 Import Data</h3>
+          <p>Import labels or dataset configurations</p>
+          <div class="bulk-actions">
+            <input type="file" id="import-file" accept=".csv,.json,.zip" style="display: none;">
+            <button id="import-labels" class="bulk-action-btn">📋 Import Labels (CSV)</button>
+            <button id="import-config" class="bulk-action-btn">⚙️ Import Configuration</button>
+          </div>
+          <div id="import-status" class="import-status" style="display: none;"></div>
+        </div>
+        
+        <div class="bulk-section">
+          <h3>🔄 Batch Operations</h3>
+          <p>Apply operations to multiple items at once</p>
+          <div class="bulk-actions">
+            <button id="reset-all-labels" class="bulk-action-btn danger">🗑️ Reset All Labels</button>
+            <button id="auto-label-confident" class="bulk-action-btn">🎯 Auto-label High Confidence</button>
+            <button id="backup-dataset" class="bulk-action-btn">💾 Backup Dataset</button>
+          </div>
+        </div>
+      </div>
+      <div class="modal-actions">
+        <button id="closeBulkOps">Close</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Image Zoom Modal -->
+  <div id="imageModal" class="modal hidden">
+    <div class="modal-content large">
+      <h2 id="imageModalTitle">Image Preview</h2>
+      <div id="tripletThreeUp">
+        <img id="imgTarget">
+        <img id="imgRef">
+        <img id="imgDiff">
+      </div>
+      <img id="imageModalImg" style="max-width: 100%; max-height: 80vh; object-fit: contain; display:none;">
+      <!-- Prediction histogram overlay -->
+      <div id="predHistOverlay" class="pred-hist-overlay" style="display:none;">
+        <canvas id="predHistCanvas" width="260" height="120"></canvas>
+      </div>
+      <div class="modal-actions">
+        <button id="closeImage">Close</button>
+      </div>
+    </div>
+  </div>
+
+  <script src="assets/js/core.js?v=3"></script>
+  <script src="assets/js/classes.js?v=3"></script>
+  <script src="assets/js/items.js?v=3"></script>
+  <script src="assets/js/selection.js?v=3"></script>
+  <script src="assets/js/views.js?v=3"></script>
+  <script src="assets/js/bulk.js?v=3"></script>
+  <script src="assets/js/model_builder.js?v=3"></script>
+  <script src="assets/js/training.js?v=3"></script>
+  <script src="assets/js/thumbs.js?v=3"></script>
+  <script src="assets/js/init.js?v=4"></script>
+</body>
+</html>
