@@ -100,15 +100,6 @@ docker build -t active-labeler .
 docker run --rm -p 8000:8000 -e AL_DATA_DIR=/data -v /host/images:/data active-labeler
 ```
 
-## Notes on Methods (peer-reviewed grounding)
-
-- **Active learning (uncertainty/diversity)**: Settles (2012, Synthesis Lectures); Sener & Savarese (2018, ICLR).
-- **Calibration**: Guo et al. (2017, ICML) temperature scaling / Platt scaling.
-- **Outliers**: Breunig et al. (2000, SIGMOD, LOF); Liu et al. (2008, ICDM, Isolation Forest).
-- **Embeddings**: ResNet18 (He et al., 2016, CVPR) via Torchvision; fallback HOG (Dalal & Triggs, 2005, CVPR).
-- **2-D maps**: UMAP (McInnes et al., 2018) and t-SNE (van der Maaten & Hinton, 2008, JMLR).
-
-See `DESIGN_NOTES.md` for details and references.
 
 ## License
 
