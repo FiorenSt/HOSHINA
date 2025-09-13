@@ -1,5 +1,5 @@
 
-# HOSHINA (Human-in-the-Loop Image Labeling & Active Sampling)
+# HOSHINA
 
 A lightweight, OS-agnostic web app to build high-quality training datasets for image classification.
 It runs entirely in your browser backed by a Python FastAPI server, and includes:
