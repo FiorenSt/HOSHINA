@@ -1,0 +1,21 @@
+# Exclusions requested
+**/thumbnails/**
+**/pngs/**
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# Node/Frontend
+node_modules/
+dist/
+build/
+
+# IDE/OS
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
