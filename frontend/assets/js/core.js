@@ -297,26 +297,17 @@ function applyAssignmentClassToNode(node, idx){
       // We'll hide this tag if we render a bottom-right badge to avoid duplicates
       tag.style.display = name ? 'inline-block' : 'none';
     }
-    // Render an in-tile bottom-right overlay with the class name only when there is no prediction/label
+    // Render an in-tile bottom-left overlay with the class name (always show when assigned)
     try {
-      const hasPred = !!node.querySelector('.badge.pred');
-      const hasLabel = !!node.querySelector('.badge.label');
       const name = (state.classes && state.classes[idx] && state.classes[idx].name) ? state.classes[idx].name : '';
-      if (!hasPred && !hasLabel && name){
-        // ensure overlay and remove any meta badge variant
+      if (name){
         ensureAssignOverlayRight(name, color);
         removeAssignedBadge();
-        // Hide the bottom-left tag to keep only one colored label visible
         if (tag) tag.style.display = 'none';
       } else {
-        // If predictions/labels exist, remove the overlay and allow the tag logic to show as usual
         removeAssignOverlayRight();
         removeAssignedBadge();
-        if (tag) {
-          // keep tag visible when appropriate
-          const name2 = (state.classes && state.classes[idx] && state.classes[idx].name) ? state.classes[idx].name : '';
-          tag.style.display = name2 ? 'inline-block' : 'none';
-        }
+        if (tag) tag.style.display = 'none';
       }
     } catch(_){ }
   } else if (tag){
@@ -325,11 +316,9 @@ function applyAssignmentClassToNode(node, idx){
     tag.style.color = '';
     // Force visible even when CSS hides tags without legacy assign-* classes
     tag.style.display = name ? 'inline-block' : 'none';
-    // Mirror logic without color: show overlay only if no prediction/label
+    // Mirror logic without color: always show overlay when assigned
     try {
-      const hasPred = !!node.querySelector('.badge.pred');
-      const hasLabel = !!node.querySelector('.badge.label');
-      if (!hasPred && !hasLabel && name){
+      if (name){
         ensureAssignOverlayRight(name, '');
         removeAssignedBadge();
         if (tag) tag.style.display = 'none';

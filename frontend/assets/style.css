@@ -808,6 +808,8 @@ button:hover {
   position: relative;
   transition: all 0.2s ease;
   cursor: pointer;
+  /* Reserve space for bottom badges/overlay to match original label display */
+  padding-bottom: 16px;
 }
 
 /* Hide per-tile checkbox (small white box in top-left) */
@@ -905,13 +907,13 @@ button:hover {
 }
 .tile .assign-overlay-right {
   position: absolute;
-  right: 8px;
-  /* place just above the meta row without changing tile size */
-  bottom: 8px;
+  left: 8px;
+  /* match the exact position of meta badges */
+  bottom: 10px;
   padding: 2px 6px;
   font-weight: 700;
-  font-size: 12px;
-  border-radius: 4px;
+  font-size: 12px; /* match .badge size */
+  border-radius: 6px; /* match .badge shape */
   background: rgba(0,0,0,0.35);
   pointer-events: none;
   z-index: 3;
@@ -972,17 +974,26 @@ button:hover {
 }
 
 .tile .meta {
+  position: absolute;
+  left: 8px;
+  right: 8px;
+  bottom: 10px; /* match overlay position exactly */
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 6px 8px;
+  padding: 0;
   font-size: 12px;
   color: var(--muted);
+  z-index: 2; /* above the image (which is z-index:1) */
+  pointer-events: none; /* don't block tile clicks */
 }
 
 .badge { padding: 2px 6px; border-radius: 6px; font-size: 11px; }
 .badge.pred { background: #1f2937; color: var(--fg); }
 .badge.label { background: var(--accent2); color: #111; }
+
+/* Remove margin to align exactly with overlay */
+.tile .meta .badge { margin-top: 0; }
 
 .hoverbar {
   position: absolute;
