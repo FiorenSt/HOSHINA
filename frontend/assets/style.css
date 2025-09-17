@@ -432,17 +432,7 @@ h1 {
   transform: translateX(4px);
 }
 
-.dropdown-btn.retrain {
-  background: var(--good);
-  border-color: var(--good);
-  color: white;
-  font-weight: 600;
-}
-
-.dropdown-btn.retrain:hover {
-  background: #059669;
-  border-color: #059669;
-}
+/* retrain button styles removed */
 
 .dropdown-input {
   background: var(--card-hover);
@@ -784,18 +774,7 @@ button:hover {
   box-shadow: 0 4px 8px rgba(56, 189, 248, 0.3);
 }
 
-.action-btn.retrain {
-  grid-column: 1 / -1;
-  background: var(--good);
-  border-color: var(--good);
-  color: white;
-  font-weight: 600;
-}
-
-.action-btn.retrain:hover {
-  background: #059669;
-  border-color: #059669;
-}
+/* .action-btn.retrain removed */
 
 .grid {
   display: grid;
@@ -867,6 +846,10 @@ button:hover {
 .single-inner { margin: 0; padding: 0; }
 .single-image { margin: 16px 0 !important; padding: 0 !important; line-height: 0 !important; }
 
+/* Center and show prediction text under triplet */
+.single-meta { text-align: center; margin: 8px 0; }
+#single-pred { text-align: center; font-weight: 600; }
+
 /* Hide filename in single mode */
 #single-filename { display: none !important; }
 
@@ -919,6 +902,19 @@ button:hover {
   border-radius: 4px;
   background: rgba(0,0,0,0.35);
   pointer-events: none;
+}
+.tile .assign-overlay-right {
+  position: absolute;
+  right: 8px;
+  /* place just above the meta row without changing tile size */
+  bottom: 8px;
+  padding: 2px 6px;
+  font-weight: 700;
+  font-size: 12px;
+  border-radius: 4px;
+  background: rgba(0,0,0,0.35);
+  pointer-events: none;
+  z-index: 3;
 }
 .tile.assign-blue .assign-tag { color: #38bdf8; }
 .tile.assign-red .assign-tag { color: #ef4444; }
@@ -1192,6 +1188,53 @@ body.modal-open {
   align-items: center;
 }
 
+.train-inline-status {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-left: 12px;
+}
+
+.train-status-row {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+}
+
+.train-status-extra {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.progress-container.small {
+  width: 160px;
+  height: 8px;
+}
+
+/* Indeterminate animation for training status progress */
+.progress-bar.indeterminate {
+  position: relative;
+  width: 100%;
+  color: transparent;
+  background: linear-gradient(90deg, rgba(56,189,248,0.15), rgba(16,185,129,0.35), rgba(56,189,248,0.15));
+}
+
+.progress-bar.indeterminate::before {
+  content: '';
+  position: absolute;
+  left: -40%;
+  top: 0;
+  height: 100%;
+  width: 40%;
+  background: linear-gradient(90deg, transparent, rgba(255,255,255,0.5), transparent);
+  animation: indet 1.2s ease-in-out infinite;
+}
+
+@keyframes indet {
+  0% { left: -40%; }
+  100% { left: 100%; }
+}
+
 .status-info {
   display: flex;
   align-items: center;
@@ -1235,7 +1278,8 @@ body.modal-open {
   padding: 1.5rem;
   margin-bottom: 2rem;
   position: relative;
-  overflow: hidden;
+  /* Allow inner dropdown menus to overflow (e.g., bulk-assign select list) */
+  overflow: visible;
 }
 
 /* Configuration Panel */
@@ -2733,4 +2777,12 @@ kbd {
 
 #statsModal .stats-grid {
   padding-bottom: 8px;
+}
+
+/* Global pressed-state feedback for interactive buttons */
+button.btn-pressed,
+.btn-pressed {
+  transform: scale(0.98);
+  filter: brightness(0.95);
+  transition: transform 0.05s ease, filter 0.05s ease;
 }

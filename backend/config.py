@@ -16,13 +16,7 @@ DATA_DIR = Path(os.getenv("AL_DATA_DIR", ""))  # set during ingest; can override
 if DATA_DIR and not Path(DATA_DIR).exists():
     DATA_DIR.mkdir(parents=True, exist_ok=True)
 
-# Thumbnails directory
-THUMB_DIR = STORE_DIR / "thumbs"
-THUMB_DIR.mkdir(parents=True, exist_ok=True)
-
-# Embeddings / models cache
-CACHE_DIR = STORE_DIR / "cache"
-CACHE_DIR.mkdir(parents=True, exist_ok=True)
+# No on-disk thumbnails or cache directories are created in on-the-fly mode
 
 # Which embedding backend to use: 'auto' | 'tf' | 'hog'
 EMBEDDING_BACKEND = os.getenv("AL_EMBEDDING_BACKEND", "auto")

@@ -146,8 +146,7 @@ async function loadItems(){
       queue: q, page: state.page, page_size: state.page_size,
       prob_low: state.prob_low, prob_high: state.prob_high, unlabeled_only: true
     });
-    // Avoid placeholders by requesting only-ready composite thumbnails on first load and pagination
-    params.set('only_ready', 'true');
+    // All groups are ready with on-the-fly generation
     // Stable ordering seed for deterministic 'all' queue order
     if (state.order_seed != null) params.set('seed', String(state.order_seed));
     // Use full mode so predictions (e.g., max_proba) are included in responses
@@ -306,12 +305,7 @@ async function batchLabelItems(ids, label=null, unsure=false, skip=false){
   }
 }
 
-async function retrain(){
-  status('🚀 Training model...');
-  const r = await api('/train', {method:'POST'});
-  status(r.ok ? `✅ Trained on ${r.labeled} labeled; predicted ${r.predicted}` : `⚠️ ${r.msg}`);
-  await loadItems();
-}
+// retrain removed: training handled via TensorFlow dashboard
 
 async function showSimilar(id){
   const data = await api(`/similar/${id}`);
@@ -566,7 +560,7 @@ function renderSuggestions(suggestions){
   if (!container) return;
   
   if (suggestions.length === 0) {
-    container.innerHTML = '<div class="no-suggestions">No suggestions available. Try retraining the model first.</div>';
+    container.innerHTML = '<div class="no-suggestions">No suggestions available. Train the model to generate predictions.</div>';
     return;
   }
   
@@ -1000,7 +994,7 @@ function setupUI(){
     state.prob_high = parseFloat(el('#high').value);
     await loadItems();
   });
-  el('#retrain').addEventListener('click', retrain);
+  // retrain button removed
   el('#export').addEventListener('click', ()=>window.location.href='/api/export');
   el('#classes').addEventListener('click', openClasses);
   el('#map').addEventListener('click', openMap);
@@ -1008,47 +1002,8 @@ function setupUI(){
   el('#suggestions').addEventListener('click', openSuggestions);
   el('#bulk-ops').addEventListener('click', openBulkOps);
   el('#help').addEventListener('click', showHelp);
-  // Background thumbnail build controls if present
-  const startBuildBtn = document.getElementById('start-thumb-build');
-  const cancelBuildBtn = document.getElementById('cancel-thumb-build');
-  const buildStatusEl = document.getElementById('thumb-build-status');
-  let buildTimer = null;
-  async function refreshBuildStatus(){
-    try {
-      const st = await api('/thumbs/build/status');
-      if (!buildStatusEl) return;
-      if (st.ok) {
-        const s = st.running ? '⏳ running' : (st.message || 'idle');
-        const pct = st.total ? Math.round((st.done||0)/st.total*100) : 0;
-        buildStatusEl.textContent = `${s} • ${st.done||0}/${st.total||0} (${pct}%)` + (st.eta_sec ? ` • ETA ${Math.max(0, st.eta_sec)}s` : '');
-      } else {
-        buildStatusEl.textContent = `⚠️ ${st.msg || 'status error'}`;
-      }
-    } catch (e) {
-      if (buildStatusEl) buildStatusEl.textContent = `⚠️ ${e.message}`;
-    }
-  }
-  async function startThumbBuild(){
-    try {
-      const body = { mode: 'composite', size: 256, only_missing: true };
-      const r = await api('/thumbs/build/start', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body) });
-      if (!r.ok) { alert(r.msg || 'Failed to start'); return; }
-      if (buildTimer) clearInterval(buildTimer);
-      buildTimer = setInterval(refreshBuildStatus, 1000);
-      await refreshBuildStatus();
-    } catch (e) { alert(e.message); }
-  }
-  async function cancelThumbBuild(){
-    try {
-      const r = await api('/thumbs/build/cancel', { method:'POST' });
-      if (!r.ok) { alert(r.msg || 'Failed to cancel'); return; }
-      if (buildTimer) clearInterval(buildTimer);
-      await refreshBuildStatus();
-    } catch (e) { alert(e.message); }
-  }
-  if (startBuildBtn) startBuildBtn.addEventListener('click', startThumbBuild);
-  if (cancelBuildBtn) cancelBuildBtn.addEventListener('click', cancelThumbBuild);
-  if (buildStatusEl) { refreshBuildStatus(); buildTimer = setInterval(refreshBuildStatus, 3000); }
+  // Remove legacy background thumbnail build controls
+  // Any UI elements for start/cancel build are now no-ops
   
   // Modal event handlers - use event delegation since elements are in hidden modals
   document.addEventListener('click', (e) => {
@@ -1272,10 +1227,7 @@ function setupUI(){
         await labelItems([first.id], null, false, true);
       }
     }
-    // Retrain (R)
-    else if(k==='r' || k==='R'){
-      await retrain();
-    }
+    // Retrain (R) removed
     // Select all (Ctrl+A)
     else if(k==='a' && e.ctrlKey){
       e.preventDefault();
@@ -1406,7 +1358,7 @@ function showHelp(){
 • X: Skip item ⏭️
 
 🚀 Actions:
-• R: Retrain model
+• T: Open TF Train
 • S: View statistics 📊
 • V: View map/visualization 🗺️
 • H or ?: Show this help

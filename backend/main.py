@@ -31,9 +31,7 @@ app.include_router(api_router, prefix="/api")
 FRONTEND_DIR = PROJECT_ROOT / "frontend"
 app.mount("/assets", StaticFiles(directory=FRONTEND_DIR / "assets"), name="assets")
 
-# Serve thumbnails as static files for direct access
-from .config import THUMB_DIR
-app.mount("/thumbs", StaticFiles(directory=THUMB_DIR), name="thumbs")
+# On-the-fly mode: no static thumbnails mount
 
 @app.get("/")
 def root():

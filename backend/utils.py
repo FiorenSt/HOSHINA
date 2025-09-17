@@ -4,8 +4,7 @@ import numpy as np
 from PIL import Image, ImageOps
 from pathlib import Path
 import io, json, base64, math
-from .config import THUMB_DIR, DATA_DIR, CACHE_DIR
-from .grouping import load_config, resolve_existing_role_file
+from .grouping import load_config, resolve_existing_role_file, match_role_and_base
 import hashlib
 import os
 import threading
@@ -79,182 +78,71 @@ def safe_open_image(path: Path) -> Image.Image:
         # Non-FITS handled by PIL
         return Image.open(path).convert("RGB")
 
-def thumb_path_for(image_path: Path, size: int = 256) -> Path:
-    # content-address thumbnails to avoid collisions
-    h = hashlib.md5(str(image_path).encode("utf-8")).hexdigest()
-    return THUMB_DIR / f"{h}_{size}.jpg"
+# Legacy thumbnail path helpers removed
 
-def get_or_make_thumb(image_path: Path, size: int = 256) -> Path:
-    """Generate thumbnail from full-res PNG for better quality and consistency.
-    
-    This replaces the old JPEG thumbnail generation with PNG-based thumbnails.
-    """
-    tp = thumb_path_for(image_path, size)
-    if tp.exists():
-        return tp
-    # Concurrency guard to avoid generating many thumbnails in parallel
-    with _thumb_sem():
-        if tp.exists():
-            return tp
-        # Use full-res PNG as source instead of processing FITS directly
-        try:
-            png_path = get_or_make_full_png(image_path)
-            img = Image.open(png_path).convert("RGB")
-        except Exception:
-            # Fallback to direct processing if PNG generation fails
-            img = safe_open_image(image_path)
-        img = ImageOps.exif_transpose(img)
-        img.thumbnail((size, size))
-        tp.parent.mkdir(parents=True, exist_ok=True)
-        img.save(tp, format="JPEG", quality=85)
-        return tp
+# Legacy thumbnail file generator removed
 
 
-def ensure_placeholder_thumb(size: int = 256) -> Path:
-    """Return path to a small gray placeholder thumbnail of given size."""
-    ph = THUMB_DIR / f"placeholder_{size}.jpg"
-    if ph.exists():
-        return ph
-    ph.parent.mkdir(parents=True, exist_ok=True)
-    img = Image.new("RGB", (size, size), color=(32, 32, 32))
-    img.save(ph, format="JPEG", quality=70)
-    return ph
+# Placeholder file helper removed (placeholders generated inline in routes)
 
-def triplet_thumb_path_for(base_key: str, size: int = 256) -> Path:
-    h = hashlib.md5(base_key.encode("utf-8")).hexdigest()
-    return THUMB_DIR / f"triplet_{h}_{size}.jpg"
+# Legacy triplet/composite path helpers removed
 
-def get_or_make_triplet_thumb(target: Optional[Path], ref: Optional[Path], diff: Optional[Path], size: int = 256) -> Path:
-    """Create or retrieve a composite triplet thumbnail (target|ref|diff).
-
-    The output is a horizontal 3-up image. Missing panels are left blank.
-    Uses full-resolution PNGs as source for better quality.
-    """
-    parts = [str(p) if p else "" for p in [target, ref, diff]]
-    base_key = "|".join(parts) + f"|{size}"
-    tp = triplet_thumb_path_for(base_key, size)
-    if tp.exists():
-        return tp
-    # Concurrency guard for triplet generation
-    with _thumb_sem():
-        if tp.exists():
-            return tp
-
-        panels: List[Image.Image] = []
-        for p in [target, ref, diff]:
-            if p and Path(p).exists():
-                try:
-                    # Use full-res PNG as source instead of processing FITS directly
-                    png_path = get_or_make_full_png(Path(p))
-                    img = Image.open(png_path).convert("RGB")
-                except Exception:
-                    img = Image.new("RGB", (size, size), color=(0,0,0))
-            else:
-                img = Image.new("RGB", (size, size), color=(0,0,0))
-            img = ImageOps.exif_transpose(img)
-            img.thumbnail((size, size))
-            # place on square canvas size x size (letterbox) to align heights
-            canvas = Image.new("RGB", (size, size), color=(0,0,0))
-            x = (size - img.width) // 2
-            y = (size - img.height) // 2
-            canvas.paste(img, (x, y))
-            panels.append(canvas)
-
-        # Concatenate horizontally
-        out = Image.new("RGB", (size * 3, size), color=(0,0,0))
-        for i, panel in enumerate(panels):
-            out.paste(panel, (i * size, 0))
-
-        tp.parent.mkdir(parents=True, exist_ok=True)
-        out.save(tp, format="JPEG", quality=85)
-        return tp
+# Legacy triplet generator removed
 
 
-def composite_thumb_path_for(keys: List[str], size: int = 256) -> Path:
-    key = "|".join(keys + [str(size)])
-    h = hashlib.md5(key.encode("utf-8")).hexdigest()
-    return THUMB_DIR / f"composite_{h}_{size}.jpg"
+# Legacy composite path helper removed
 
 
-def get_or_make_composite_thumb(parent: Path, base: str, size: int = 256) -> Path:
-    """Generalized N-role composite thumbnail using grouping config.
+# Legacy composite generator removed
 
-    - Each role is rendered as a size x size panel on a horizontal strip.
-    - Missing roles are rendered as black panels to preserve alignment.
-    - Cache key includes resolved file paths and size.
-    """
-    cfg = load_config()
-    role_paths: List[Optional[Path]] = []
-    key_parts: List[str] = []
-    for role in cfg.roles:
-        rp = resolve_existing_role_file(parent, base, role, cfg)
-        role_paths.append(rp)
-        key_parts.append(str(rp) if rp else "")
-    tp = composite_thumb_path_for(key_parts, size=size)
-    if tp.exists():
-        return tp
-    with _thumb_sem():
-        if tp.exists():
-            return tp
-        panels: List[Image.Image] = []
-        for p in role_paths:
-            if p and Path(p).exists():
-                try:
-                    # Use full-res PNG as source for better quality
-                    png_path = get_or_make_full_png(Path(p))
-                    img = Image.open(png_path).convert("RGB")
-                except Exception:
-                    img = Image.new("RGB", (size, size), color=(0,0,0))
-            else:
-                img = Image.new("RGB", (size, size), color=(0,0,0))
-            img = ImageOps.exif_transpose(img)
-            img.thumbnail((size, size))
-            canvas = Image.new("RGB", (size, size), color=(0,0,0))
-            x = (size - img.width) // 2
-            y = (size - img.height) // 2
-            canvas.paste(img, (x, y))
-            panels.append(canvas)
-        out = Image.new("RGB", (size * max(1, len(panels)), size), color=(0,0,0))
-        for i, panel in enumerate(panels):
-            out.paste(panel, (i * size, 0))
-        tp.parent.mkdir(parents=True, exist_ok=True)
-        out.save(tp, format="JPEG", quality=85)
-        return tp
+# ===== Deletion helpers for thumbnails (legacy cleanup) =====
 
-# ===== Full-resolution PNG cache (optional display/training source) =====
-def _png_dir() -> Path:
-    d = CACHE_DIR / "png"
-    d.mkdir(parents=True, exist_ok=True)
-    return d
-
-
-def png_path_for(image_path: Path) -> Path:
+def _delete_file_if_exists(path: Path) -> bool:
     try:
-        stat = image_path.stat()
-        key = f"{str(image_path)}|{stat.st_mtime_ns}|fullpng"
+        if path.exists() and path.is_file():
+            path.unlink(missing_ok=True)
+            return True
     except Exception:
-        key = f"{str(image_path)}|fullpng"
-    h = hashlib.md5(key.encode("utf-8")).hexdigest()
-    return _png_dir() / f"{h}.png"
+        # Best-effort deletion; ignore errors
+        pass
+    return False
 
 
-def get_or_make_full_png(image_path: Path) -> Path:
-    """Render the source image to a full-resolution PNG and cache it.
+def delete_thumbnails_for_path(image_path: Path, sizes: List[int] | None = None) -> int:
+    """Delete thumbnail files related to a source image path.
 
-    Note: This converts FITS via safe_open_image and preserves pixel dimensions
-    of the rendered view (after stretching), not original FITS dtype range.
+    Removes:
+    - Single-image thumbnails for the exact path
+    - Triplet thumbnails (target|ref|diff) if applicable
+    - Composite group thumbnails according to current grouping config
+
+    Returns the number of files deleted.
     """
-    pp = png_path_for(image_path)
-    if pp.exists():
-        return pp
-    with _thumb_sem():
-        if pp.exists():
-            return pp
-        img = safe_open_image(image_path)
-        img = ImageOps.exif_transpose(img)
-        pp.parent.mkdir(parents=True, exist_ok=True)
-        img.save(pp, format="PNG")
-        return pp
+    deleted = 0
+    sizes = sizes or [256]
+    # Single thumbs no longer created
+
+    # Group-derived thumbs (triplet and composite) no longer created
+    pass
+
+    return deleted
+
+# (Removed) Full-resolution PNG cache: all PNG caching logic deleted per design change
+
+# ===== File content hashing =====
+def compute_file_hash(path: Path, algo: str = "sha256", chunk_size: int = 1024 * 1024) -> str:
+    """Compute a stable content hash of a file by streaming bytes.
+
+    Defaults to SHA-256 for collision resistance while staying reasonably fast.
+    """
+    h = hashlib.new(algo)
+    with open(path, "rb") as f:
+        while True:
+            b = f.read(chunk_size)
+            if not b:
+                break
+            h.update(b)
+    return h.hexdigest()
 
 # ===== Internal: bounded semaphore for generation =====
 _SEM_OBJ = None

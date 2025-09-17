@@ -6,7 +6,21 @@ import threading
 import time
 
 from .db import get_session, DatasetItem
-from .utils import get_or_make_thumb, get_or_make_triplet_thumb, get_or_make_composite_thumb
+"""
+Deprecated: Thumbnail worker removed. This module is retained to avoid import errors but does nothing.
+"""
+
+def is_running() -> bool:
+    return False
+
+def start(*args, **kwargs):
+    return {"queued": False, "position": 0}
+
+def status():
+    return {"running": False, "message": "idle"}
+
+def cancel():
+    return None
 from .grouping import load_config, match_role_and_base
 
 _state_lock = threading.Lock()
@@ -17,6 +31,8 @@ _status: Dict[str, object] = {
     "running": False,
     "mode": "triplet",
     "size": 256,
+    "assets": "thumbs",  # thumbs only
+    "unlabeled_only": True,
     "total": 0,
     "done": 0,
     "skipped": 0,
@@ -32,11 +48,19 @@ def _update(**kwargs):
         _status.update(kwargs)
 
 
-def _items_iter() -> List[DatasetItem]:
+def _items_iter(unlabeled_only: bool) -> List[DatasetItem]:
     with next(get_session()) as session:
-        items = session.exec(
-            DatasetItem.__table__.select()  # type: ignore[attr-defined]
-        ).all()
+        if unlabeled_only:
+            # Unlabeled = no label assigned and not explicitly skipped
+            items = session.exec(
+                DatasetItem.__table__.select().where(  # type: ignore[attr-defined]
+                    (DatasetItem.label.is_(None)) & (DatasetItem.skipped == False)  # type: ignore[comparison-overlap]
+                )
+            ).all()
+        else:
+            items = session.exec(
+                DatasetItem.__table__.select()  # type: ignore[attr-defined]
+            ).all()
     return items
 
 
@@ -62,11 +86,11 @@ def _triplet_paths(p: Path) -> tuple[Optional[Path], Optional[Path], Optional[Pa
     return target, ref, diff, base_key
 
 
-def _worker(mode: str, size: int, only_missing: bool, limit: Optional[int]):
+def _worker(mode: str, size: int, only_missing: bool, limit: Optional[int], unlabeled_only: bool, assets: str):
     start_ts = time.time()
-    _update(running=True, mode=mode, size=size, done=0, skipped=0, errors=0, eta_sec=None, started_at=start_ts, message="scanning")
+    _update(running=True, mode=mode, size=size, assets=assets, unlabeled_only=unlabeled_only, done=0, skipped=0, errors=0, eta_sec=None, started_at=start_ts, message="scanning")
     try:
-        items = _items_iter()
+        items = _items_iter(unlabeled_only=unlabeled_only)
         if limit is not None:
             items = items[: int(limit)]
         total = len(items)
@@ -79,19 +103,21 @@ def _worker(mode: str, size: int, only_missing: bool, limit: Optional[int]):
                 break
             p = Path(it.path)
             try:
-                if mode == "single":
-                    get_or_make_thumb(p, size=size)
-                elif mode == "triplet":
-                    target, ref, diff, _ = _triplet_paths(p)
-                    if not any([target, ref, diff]):
+                # Build thumbnails/composites if requested
+                if assets in ("thumbs",):
+                    if mode == "single":
                         get_or_make_thumb(p, size=size)
+                    elif mode == "triplet":
+                        target, ref, diff, _ = _triplet_paths(p)
+                        if not any([target, ref, diff]):
+                            get_or_make_thumb(p, size=size)
+                        else:
+                            get_or_make_triplet_thumb(target, ref, diff, size=size)
                     else:
-                        get_or_make_triplet_thumb(target, ref, diff, size=size)
-                else:
-                    # generic composite based on grouping config
-                    cfg = load_config()
-                    _, base = match_role_and_base(p, cfg)
-                    get_or_make_composite_thumb(p.parent, base, size=size)
+                        # generic composite based on grouping config
+                        cfg = load_config()
+                        _, base = match_role_and_base(p, cfg)
+                        get_or_make_composite_thumb(p.parent, base, size=size)
                 done = int(_status.get("done", 0)) + 1
                 now = time.time()
                 if now - last_update > 0.5:
@@ -113,11 +139,11 @@ def _worker(mode: str, size: int, only_missing: bool, limit: Optional[int]):
         _update(running=False)
 
 
-def start(mode: str = "triplet", size: int = 256, only_missing: bool = True, limit: Optional[int] = None):
+def start(mode: str = "triplet", size: int = 256, only_missing: bool = True, limit: Optional[int] = None, unlabeled_only: bool = True, assets: str = "thumbs"):
     global _thread
     if is_running():
         raise RuntimeError("Worker already running")
-    _thread = threading.Thread(target=_worker, args=(mode, size, only_missing, limit), daemon=True)
+    _thread = threading.Thread(target=_worker, args=(mode, size, only_missing, limit, unlabeled_only, assets), daemon=True)
     _thread.start()
 
 

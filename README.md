@@ -63,7 +63,7 @@ uvicorn backend.main:app --host 0.0.0.0 --port 8000
 
 ### Image/Thumbnail Serving
 
-- Thumbnails are served at `/api/thumb/{item_id}` and generated on demand into `store/thumbs/`.
+- Thumbnails are served at `/api/thumb/{item_id}` and are generated on-the-fly (no files written).
 - Full-size image preview is served at `/api/file/{item_id}`. FITS files are converted to JPEG on the fly using `astropy` + PIL.
 - If FITS previews fail, install `astropy` (`pip install astropy`).
 

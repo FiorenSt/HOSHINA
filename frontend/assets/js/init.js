@@ -27,10 +27,12 @@ function setupUI(){
     // Toggle probability band controls visibility when in band mode
     const bandGroup = el('#header-probability-band');
     if (bandGroup) bandGroup.style.display = (queue === 'band') ? 'flex' : 'none';
+    // Certain controls removed
   };
   addListener('#smart-uncertain', 'click', async ()=>{ await setQueueAndRefresh('uncertain'); });
   addListener('#smart-diverse', 'click', async ()=>{ await setQueueAndRefresh('diverse'); });
   addListener('#smart-odd', 'click', async ()=>{ await setQueueAndRefresh('odd'); });
+  // Removed: smart-certain
   addListener('#smart-all', 'click', async ()=>{ await setQueueAndRefresh('all'); });
   addListener('#smart-borderline', 'click', async ()=>{
     // Map Borderline to a probability band around 0.5
@@ -41,19 +43,26 @@ function setupUI(){
     state.prob_low = low; state.prob_high = high;
     await setQueueAndRefresh('band');
   });
+  // Certain apply removed
   // Apply probability band explicitly; ensure queue=band
   addListener('#pull', 'click', async ()=>{ 
     state.prob_low = parseFloat(el('#low').value); 
     state.prob_high = parseFloat(el('#high').value); 
     await setQueueAndRefresh('band'); 
   });
-  addListener('#retrain', 'click', retrain);
   addListener('#train-tf', 'click', () => {
-    if (window.trainingDashboard) {
-      window.trainingDashboard.show();
-    } else {
-      console.error('Training dashboard not available');
-    }
+    try {
+      if (typeof showTrainingDashboard === 'function') {
+        showTrainingDashboard();
+      } else if (window.trainingDashboard && typeof window.trainingDashboard.show === 'function') {
+        window.trainingDashboard.show();
+      } else {
+        console.error('Training dashboard not available');
+      }
+    } catch(e){ console.error('Failed to open training dashboard', e); }
+  });
+  addListener('#bulk-assign-open', 'click', () => {
+    try { openModal('#bulkAssignModal'); } catch(e){ console.warn('Bulk Assign modal missing', e); }
   });
   // Remove stale export button listener if element not present
   // (kept no-op to avoid console noise)
@@ -69,9 +78,34 @@ function setupUI(){
   addListener('#stats', 'click', openStats);
   // Removed suggestions modal; Smart Suggestions now updates main grid directly
   addListener('#bulk-ops', 'click', openBulkOps);
+  // recover-missing no longer triggers thumbnail rebuild; provide info instead
+  addListener('#recover-missing', 'click', async () => {
+    alert('Thumbnails are generated on-the-fly now. No rebuild needed.');
+  });
   addListener('#import-folder-labeled', 'click', () => {
     openModal('#importFolderModal');
     const st = el('#ifl-status'); if (st) { st.style.display = 'none'; st.textContent = ''; }
+  });
+  // Bulk assign modal handlers
+  addListener('#bulkAssignClose', 'click', () => closeModal('#bulkAssignModal'));
+  addListener('#bulk-assign-by-threshold', 'click', async () => {
+    const btn = el('#bulk-assign-by-threshold');
+    try {
+      const classSel = el('#bulk-class-select');
+      const thrInp = el('#bulk-threshold');
+      const unlOnly = el('#bulk-unlabeled-only');
+      const className = classSel ? String(classSel.value || '').trim() : '';
+      const thrVal = thrInp ? parseFloat(thrInp.value || '0.5') : 0.5;
+      const unlabeledOnly = !!(unlOnly && unlOnly.checked);
+      if (!className){ alert('Please select a class to assign.'); return; }
+      if (!(thrVal >= 0 && thrVal <= 1)) { alert('Threshold must be between 0 and 1.'); return; }
+      if (btn) btn.disabled = true;
+      const r = await fetch('/api/predictions/apply-threshold', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ class_name: className, negative_class: null, threshold: thrVal, unlabeled_only: unlabeledOnly }) });
+      const data = await r.json();
+      if (!data.ok){ alert(data.msg || 'Bulk assign failed'); }
+      else { alert(`Assigned ${data.updated} items to ${className} at ≥ ${thrVal.toFixed(2)}`); closeModal('#bulkAssignModal'); await loadItems(); }
+    } catch(e){ alert(`Bulk assign failed: ${e.message}`); }
+    finally { if (btn) btn.disabled = false; }
   });
   // Capture-phase fallback for overlay dropdown clicks
   try {
@@ -86,7 +120,6 @@ function setupUI(){
   addListener('#ifl-run', 'click', async () => {
     const folder = el('#ifl-folder')?.value.trim();
     const cls = el('#ifl-class')?.value.trim();
-    const trip = !!el('#ifl-triplets')?.checked;
     const thumbs = false;
     const requireAll = !!el('#ifl-require-all')?.checked;
     const maxGroupsVal = (el('#ifl-max-groups')?.value || '').trim();
@@ -106,13 +139,11 @@ function setupUI(){
       if (st) { st.className = 'import-status loading'; st.textContent = 'Importing...'; st.style.display = 'block'; }
       const res = await fetch('/api/import-folder-labeled', {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ folder_path: folder, class_name: cls, create_triplets: trip, make_thumbs: false, group_require_all: requireAll, max_groups: maxGroups })
+        body: JSON.stringify({ folder_path: folder, class_name: cls, make_thumbs: false, group_require_all: requireAll, max_groups: maxGroups })
       });
       const data = await res.json();
       if (data.ok) {
-        const labeledGroups = (typeof data.labeled_groups === 'number') ? data.labeled_groups : (typeof data.processed_groups === 'number' ? data.processed_groups : null);
-        const labeledDisplay = (labeledGroups !== null) ? labeledGroups : data.labeled;
-        if (st) { st.className = 'import-status success'; st.textContent = `✅ Ingested ${data.ingested}, labeled ${labeledDisplay}, groups ${data.triplet_groups}`; }
+        if (st) { st.className = 'import-status success'; st.textContent = `✅ Ingested ${data.ingested}, labeled ${data.labeled}`; }
         await loadItems();
         try { await refreshStatsDisplay(); } catch(_){ }
       } else {
@@ -225,6 +256,11 @@ function setupUI(){
       // Refresh the UI
       await loadItems();
       try { await refreshStatsDisplay(); } catch(_){ }
+      // Clear predictions/sort flags after a full reset
+      try {
+        localStorage.removeItem('al_predictions_available');
+        localStorage.setItem('al_sort_pred', '');
+      } catch(_){ }
       
       // Force full page reload so the cleared state is obvious everywhere
       try { setTimeout(() => { window.location.reload(); }, 50); } catch(_){ }
@@ -259,17 +295,23 @@ function setupUI(){
   const singleUnsureBtn = el('#single-unsure');
   if (singleUnsureBtn) singleUnsureBtn.addEventListener('click', () => {
     if (state.mode !== 'single') return;
-    const grp = state.groups[state.groupIndex];
+    const grp = state.single_groups[state.groupIndex];
     if (!grp) return;
-    batchLabelItems(grp.memberIds, null, true, false).catch(()=>{});
+    batchLabelItems(grp.memberIds, null, true, false, false).then(()=>{
+      try { if (typeof updateSingleBuffersAfterLabel === 'function') updateSingleBuffersAfterLabel(grp.memberIds, null, true, false); } catch(_){ }
+      if (typeof renderSingleView === 'function') renderSingleView();
+    }).catch(()=>{});
     if (typeof advanceSingleNext === 'function') advanceSingleNext();
   });
   const singleSkipBtn = el('#single-skip');
   if (singleSkipBtn) singleSkipBtn.addEventListener('click', () => {
     if (state.mode !== 'single') return;
-    const grp = state.groups[state.groupIndex];
+    const grp = state.single_groups[state.groupIndex];
     if (!grp) return;
-    batchLabelItems(grp.memberIds, null, false, true).catch(()=>{});
+    batchLabelItems(grp.memberIds, null, false, true, false).then(()=>{
+      try { if (typeof updateSingleBuffersAfterLabel === 'function') updateSingleBuffersAfterLabel(grp.memberIds, null, false, true); } catch(_){ }
+      if (typeof renderSingleView === 'function') renderSingleView();
+    }).catch(()=>{});
     if (typeof advanceSingleNext === 'function') advanceSingleNext();
   });
   addListener('#single-prev', 'click', () => { if (state.mode === 'single' && typeof navigateSingle === 'function') navigateSingle(-1); });
@@ -300,11 +342,10 @@ function setupUI(){
       const maxGroupsVal = (el('#apply-max-groups')?.value || '').trim();
       const maxGroups = maxGroupsVal ? parseInt(maxGroupsVal, 10) : null;
       const requireAll = !!el('#apply-require-all')?.checked;
-      const generatePNGs = !!el('#apply-generate-pngs')?.checked;
       status('Ingesting data...');
 
       // Start async ingest with progress reporting
-      const startBody = { data_dir: val, by_groups: !!(maxGroups && maxGroups > 0), max_groups: maxGroups, generate_pngs: generatePNGs, require_all_roles: requireAll };
+      const startBody = { data_dir: val, by_groups: !!(maxGroups && maxGroups > 0), max_groups: maxGroups, require_all_roles: requireAll };
       const start = await api('/ingest/start', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(startBody) });
       if (!start.ok) { status(start.msg || 'Failed to start ingest'); return; }
       if (start.queued) {
@@ -323,7 +364,7 @@ function setupUI(){
         const pct = total ? Math.round(done / total * 100) : 0;
         if (progressBar) { progressBar.style.width = `${pct}%`; progressBar.textContent = `${pct}%`; }
         const eta = (st.eta_sec || st.eta_sec === 0) ? ` • ETA ${Math.max(0, st.eta_sec)}s` : '';
-        const pngs = st.pngs ? ` • PNGs ${st.pngs}/${totalFiles}` : '';
+        const pngs = '';
         const errs = st.errors ? ` • errors ${st.errors}` : '';
         
         // Show special notification when database is ready for classification
@@ -332,10 +373,10 @@ function setupUI(){
           statusMsg = `✅ ${statusMsg} - You can start classifying now!`;
         }
         
-        // Show appropriate units (triplets vs files)
+        // Show appropriate units; clarify that files count refers to DB ingestion, not thumbnail creation
         const unitLabel = st.by_groups ? 'triplets' : 'files';
         const progressInfo = st.by_groups && totalFiles ? 
-          `${done}/${total} ${unitLabel} (${st.ingested || 0}/${totalFiles} files) (${pct}%)` :
+          `${done}/${total} ${unitLabel} • files ${st.ingested || 0}/${totalFiles} (${pct}%)` :
           `${done}/${total} ${unitLabel} (${pct}%)`;
         
         status(`${statusMsg} • ${progressInfo}${eta}${pngs}${errs}`);
@@ -375,23 +416,38 @@ function setupUI(){
     state.currentIndex = 0;
     state.groupIndex = 0;
     
-    // Set tile size to 'large' when switching to single mode
+    // Set tile size to 'large' and decouple single-view data from grid
     if (state.mode === 'single') {
       state.tile_size = 'large';
       localStorage.setItem('al_tile_size', 'large');
       const tileSizeSel = el('#tileSize');
       if (tileSizeSel) tileSizeSel.value = 'large';
+      // Reset single buffer and start fresh incremental fetch
+      try { if (typeof resetSingleBuffer === 'function') resetSingleBuffer(); } catch(_){ }
     }
     
-    // Hide page size selector in single mode; keep size selector visible
+    // Hide page size selector in single mode; keep tile size selector visible
     try {
       const ps = el('#pageSize');
       const pageSizeGroup = ps ? ps.closest('.quick-control-group') : null;
       if (pageSizeGroup) pageSizeGroup.style.display = state.mode === 'single' ? 'none' : '';
     } catch(_){ }
-    if (state.mode === 'single') await renderSingleView();
-    else { const grid = el('#grid'); if (grid) grid.style.display = ''; const sv = el('#single-view'); if (sv) sv.style.display = 'none'; try { const ac = el('#assignment-controls'); if (ac) ac.style.display = ''; const bac = el('#bottom-assignment-controls'); if (bac) bac.style.display = ''; } catch(_){ } }
+    if (state.mode === 'single') {
+      // In single view, do not depend on grid pagination; fetch first chunk for single buffer
+      try { if (typeof singleFetchNextPage === 'function') await singleFetchNextPage(); } catch(_){ }
+      await renderSingleView();
+    }
+    else {
+      // Return to grid: rebuild grid with fresh page to fill full grid
+      const grid = el('#grid'); if (grid) grid.style.display = '';
+      const sv = el('#single-view'); if (sv) sv.style.display = 'none';
+      try { const ac = el('#assignment-controls'); if (ac) ac.style.display = ''; const bac = el('#bottom-assignment-controls'); if (bac) bac.style.display = ''; } catch(_){ }
+      // Load grid items for current page size
+      await loadItems();
+    }
     const modeSel = el('#mode-select'); if (modeSel) modeSel.value = state.mode;
+    // Ensure pagination/info bar reflects the current mode immediately
+    try { if (typeof updatePagination === 'function') updatePagination(); } catch(_){}
   };
   // Mode select dropdown removed - using buttons instead
   addListener('#view-mode-grid', 'click', async ()=>{ await applyMode('grid'); });
@@ -402,19 +458,26 @@ function setupUI(){
     // Map cycling indices to classes dynamically for N classes
     const classes = state.classes.map(c=>c.name);
     const byIdx = new Map();
+    const allIds = [];
+    // Suppress inline updates for atomic in-place replace
+    state.suppressInlineLabelUpdates = true;
     state.assignmentMap.forEach((idx, id)=>{
       if (typeof idx === 'number' && idx >= 0 && idx < classes.length){
         if (!byIdx.has(idx)) byIdx.set(idx, []);
         byIdx.get(idx).push(id);
+        allIds.push(id);
       }
     });
     for (let i=0;i<classes.length;i++){
       const ids = byIdx.get(i) || [];
       const cls = classes[i];
-      if (ids.length && cls){ await batchLabelItems(ids, cls, false, false); }
+      if (ids.length && cls){ await batchLabelItems(ids, cls, false, false, false); }
     }
+    // Perform atomic in-place replacement of just the selected tiles
+    try { if (typeof inPlaceRefreshAfterAssignments === 'function') await inPlaceRefreshAfterAssignments(allIds); }
+    catch(_){ await loadItems(); }
+    finally { state.suppressInlineLabelUpdates = false; }
     clearAssignments();
-    await loadItems();
   };
   addListener('#apply-assignments', 'click', applyAssignments);
   addListener('#apply-assignments-bottom', 'click', applyAssignments);
@@ -498,15 +561,19 @@ function setupUI(){
     labelFilter.addEventListener('change', async (e) => { state.label_filter = e.target.value; state.page = 1; await loadItems(); });
   }
   document.addEventListener('keydown', async (e)=>{
-    const k = e.key; const first = state.items[0];
+    const k = e.key; const first = state.items[0]; const isSingle = state.mode === 'single';
     if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') return;
-    if(!first) return;
+    if(!isSingle && !first) return;
     if(state.keyMap[k]){
       if (state.mode === 'single'){
-        const grp = state.groups[state.groupIndex];
-        const ids = grp ? grp.memberIds : [(state.items[state.currentIndex] || first).id];
-        // Fire-and-forget label to keep UI responsive; refresh happens in background
-        batchLabelItems(ids, state.keyMap[k], false, false).catch(()=>{});
+        const grp = state.single_groups[state.groupIndex];
+        const ids = grp ? grp.memberIds : [(state.single_items[state.currentIndex] || state.items[state.currentIndex] || first).id];
+        // Fire-and-forget label; suppress background reload to avoid double refresh
+        batchLabelItems(ids, state.keyMap[k], false, false, false).then(()=>{
+          try { if (typeof updateSingleBuffersAfterLabel === 'function') updateSingleBuffersAfterLabel(ids, state.keyMap[k], false, false); } catch(_){ }
+          // Refresh current single view to show updated label
+          if (typeof renderSingleView === 'function') renderSingleView();
+        }).catch(()=>{});
         await advanceSingleNext();
       } else {
         if (state.selectedItems.size > 0) await batchLabelItems(Array.from(state.selectedItems), state.keyMap[k], false, false);
@@ -515,23 +582,29 @@ function setupUI(){
     }
     else if(k==='0'){
       if (state.mode === 'single'){
-        const grp = state.groups[state.groupIndex];
-        const ids = grp ? grp.memberIds : [(state.items[state.currentIndex] || first).id];
-        batchLabelItems(ids, null, true, false).catch(()=>{});
+        const grp = state.single_groups[state.groupIndex];
+        const ids = grp ? grp.memberIds : [(state.single_items[state.currentIndex] || state.items[state.currentIndex] || first).id];
+        batchLabelItems(ids, null, true, false, false).then(()=>{
+          try { if (typeof updateSingleBuffersAfterLabel === 'function') updateSingleBuffersAfterLabel(ids, null, true, false); } catch(_){ }
+          if (typeof renderSingleView === 'function') renderSingleView();
+        }).catch(()=>{});
         await advanceSingleNext();
       } else if (state.selectedItems.size > 0) await batchLabelItems(Array.from(state.selectedItems), null, true, false);
       else await labelItems([first.id], null, true, false);
     }
     else if(k==='x' || k==='X'){
       if (state.mode === 'single'){
-        const grp = state.groups[state.groupIndex];
-        const ids = grp ? grp.memberIds : [(state.items[state.currentIndex] || first).id];
-        batchLabelItems(ids, null, false, true).catch(()=>{});
+        const grp = state.single_groups[state.groupIndex];
+        const ids = grp ? grp.memberIds : [(state.single_items[state.currentIndex] || state.items[state.currentIndex] || first).id];
+        batchLabelItems(ids, null, false, true, false).then(()=>{
+          try { if (typeof updateSingleBuffersAfterLabel === 'function') updateSingleBuffersAfterLabel(ids, null, false, true); } catch(_){ }
+          if (typeof renderSingleView === 'function') renderSingleView();
+        }).catch(()=>{});
         await advanceSingleNext();
       } else if (state.selectedItems.size > 0) await batchLabelItems(Array.from(state.selectedItems), null, false, true);
       else await labelItems([first.id], null, false, true);
     }
-    else if(k==='r' || k==='R'){ await retrain(); }
+    // Removed retrain shortcut (R) to simplify flows
     else if(k==='a' && e.ctrlKey){ e.preventDefault(); state.items.forEach(item => state.selectedItems.add(item.id)); updateBatchControls(); loadItems(); }
     else if(k==='Escape'){ state.selectedItems.clear(); updateBatchControls(); loadItems(); }
     else if(k==='h' || k==='?'){ showHelp(); }
@@ -546,6 +619,78 @@ function setupUI(){
     else if(k==='s' || k==='S'){ await openStats(); }
     else if(k==='v' || k==='V'){ await openMap(); }
   });
+
+  // Global button pressed visual feedback (mouse, touch, keyboard)
+  (function(){
+    const addPressed = (target)=>{ if (target && target.tagName === 'BUTTON') target.classList.add('btn-pressed'); };
+    const removePressed = (target)=>{ if (target && target.tagName === 'BUTTON') target.classList.remove('btn-pressed'); };
+    // Pointer events
+    document.addEventListener('pointerdown', (e)=>{
+      const btn = e.target && (e.target.closest && e.target.closest('button'));
+      if (btn) btn.classList.add('btn-pressed');
+    });
+    document.addEventListener('pointerup', (e)=>{
+      const btn = e.target && (e.target.closest && e.target.closest('button'));
+      if (btn) btn.classList.remove('btn-pressed');
+    });
+    document.addEventListener('pointercancel', (e)=>{
+      const btn = e.target && (e.target.closest && e.target.closest('button'));
+      if (btn) btn.classList.remove('btn-pressed');
+    });
+    document.addEventListener('pointerleave', (e)=>{
+      const btn = e.target && (e.target.closest && e.target.closest('button'));
+      if (btn) btn.classList.remove('btn-pressed');
+    });
+    // Keyboard activation space/enter while focused
+    document.addEventListener('keydown', (e)=>{
+      if ((e.key === ' ' || e.key === 'Enter')){
+        const btn = document.activeElement && document.activeElement.tagName === 'BUTTON' ? document.activeElement : (e.target && e.target.closest && e.target.closest('button'));
+        addPressed(btn);
+      }
+    }, true);
+    document.addEventListener('keyup', (e)=>{
+      if ((e.key === ' ' || e.key === 'Enter')){
+        const btn = document.activeElement && document.activeElement.tagName === 'BUTTON' ? document.activeElement : (e.target && e.target.closest && e.target.closest('button'));
+        removePressed(btn);
+      }
+    }, true);
+    // Clean up on blur
+    document.addEventListener('blur', (e)=>{
+      const btn = e.target && e.target.tagName === 'BUTTON' ? e.target : null;
+      if (btn) btn.classList.remove('btn-pressed');
+    }, true);
+  })();
+
+  // Sort by Predicted toggle (top-right of Apply assignments)
+  (function(){
+    const btn = el('#sort-by-pred');
+    if (!btn) return;
+    // Gate visibility until predictions exist at least once
+    const hasPreds = (typeof getPredictionsAvailableFlag === 'function') ? getPredictionsAvailableFlag() : (localStorage.getItem('al_predictions_available') === '1');
+    btn.style.display = hasPreds ? '' : 'none';
+    // state.sort_pred can be 'asc' | 'desc' | '' and defaults to '' (unsorted)
+    const saved = localStorage.getItem('al_sort_pred') || '';
+    state.sort_pred = (saved === 'asc' || saved === 'desc') ? saved : '';
+    const applyLabel = () => {
+      if (!state.sort_pred) { btn.textContent = 'Sort: Predicted'; return; }
+      btn.textContent = state.sort_pred === 'asc' ? 'Sort: Predicted ↑' : 'Sort: Predicted ↓';
+    };
+    applyLabel();
+    btn.addEventListener('click', ()=>{
+      // Cycle: desc -> asc -> off -> desc
+      if (state.sort_pred === 'desc') state.sort_pred = 'asc';
+      else if (state.sort_pred === 'asc') state.sort_pred = '';
+      else state.sort_pred = 'desc';
+      localStorage.setItem('al_sort_pred', state.sort_pred);
+      applyLabel();
+      // Fire-and-forget; previous in-flight request is aborted in loadItems
+      loadItems();
+    });
+    // Reveal button the moment predictions become available
+    try {
+      document.addEventListener('al:predictions-available', ()=>{ btn.style.display = ''; }, { once: true });
+    } catch(_){ }
+  })();
 
   // Entire Page assignment inline buttons (bottom-right, same bar as Apply assignments)
   const pageAssignInline = el('#page-assign-inline');
@@ -574,7 +719,7 @@ function setupUI(){
         const ids = groups.flatMap(g => g.memberIds || []).filter(Boolean);
         const groupCount = groups.length || 0;
         if (ids.length === 0) return;
-        if (!confirm(`Assign ALL ${groupCount} groups on this page to ${cls.name}?`)) return;
+        if (!confirm(`Assign ALL ${groupCount} triplets on this page to ${cls.name}?`)) return;
         // Build a single payload of all member IDs across the visible triplet groups
         const allIds = groups.flatMap(g => (g.memberIds || [])).filter(Boolean);
         await batchLabelItems(allIds, cls.name, false, false);
@@ -719,6 +864,10 @@ function setupCategoryDropdowns() {
   // Set tile size to 'large' if mode is 'single', otherwise use saved tile size
   const savedTileSize = localStorage.getItem('al_tile_size') || 'xlarge';
   state.tile_size = savedMode === 'single' ? 'large' : savedTileSize;
+  // If restoring single mode on load, ensure page size is set to the maximum available
+  try {
+    if (savedMode === 'single'){ if (typeof resetSingleBuffer === 'function') resetSingleBuffer(); }
+  } catch(_){ }
   // Mode select dropdown removed - mode is set via buttons
   const tileSizeSel = el('#tileSize'); if (tileSizeSel) tileSizeSel.value = state.tile_size;
   // Default to random order of triplet groups on initial load
@@ -726,8 +875,12 @@ function setupCategoryDropdowns() {
   
   // Load items with error handling to prevent UI blocking
   try {
-    await loadItems();
-    if (state.mode === 'single') await renderSingleView();
+    if (state.mode === 'single') {
+      try { if (typeof singleFetchNextPage === 'function') await singleFetchNextPage(); } catch(_){ }
+      await renderSingleView();
+    } else {
+      await loadItems();
+    }
   } catch (e) {
     console.warn('Initial load failed:', e);
     status('Ready - no items loaded yet');
@@ -740,6 +893,8 @@ function setupCategoryDropdowns() {
     const pageSizeGroup = ps ? ps.closest('.quick-control-group') : null;
     if (pageSizeGroup) pageSizeGroup.style.display = state.mode === 'single' ? 'none' : '';
   } catch(_){}
+  // Ensure pagination display reflects current mode immediately
+  try { if (typeof updatePagination === 'function') updatePagination(); } catch(_){ }
   // Hide probability band controls initially unless queue=band
   try {
     const bandGroup = el('#header-probability-band');

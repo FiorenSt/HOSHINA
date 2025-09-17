@@ -23,9 +23,17 @@ function renderSuggestions(suggestions){
   const container = el('#suggestions-content');
   if (!container) return;
   if (suggestions.length === 0) {
-    container.innerHTML = '<div class="no-suggestions">No suggestions available. Try retraining the model first.</div>';
+    container.innerHTML = '<div class="no-suggestions">No suggestions available. Train the model to generate predictions.</div>';
     return;
   }
+  // Ensure suggestions are sorted by score; default to descending
+  try {
+    suggestions = suggestions.slice().sort((a,b)=>{
+      const sa = (typeof a.score === 'number') ? a.score : Number.NEGATIVE_INFINITY;
+      const sb = (typeof b.score === 'number') ? b.score : Number.NEGATIVE_INFINITY;
+      return sb - sa;
+    });
+  } catch(_){}
   container.innerHTML = suggestions.map(item => `
     <div class="suggestion-item" data-id="${item.id}">
       <img src="${item.thumb}" loading="lazy" />
@@ -48,8 +56,18 @@ function showImageZoom(itemId){
   if (title) title.textContent = `Image: ${item.path.split('/').pop()}`;
   const three = el('#tripletThreeUp');
   const single = el('#imageModalImg');
-  // reset and draw prediction histogram overlay
-  renderPredHistogramOverlay(item.max_proba);
+  // reset and draw prediction histogram overlay using positive class probability if available
+  let posName = '';
+  try { posName = localStorage.getItem('al_positive_class') || ''; } catch(_){ posName = ''; }
+  let currentProb = null;
+  try {
+    if (posName && item && item.probs && Object.prototype.hasOwnProperty.call(item.probs, posName)){
+      const v = Number(item.probs[posName]);
+      if (Number.isFinite(v)) currentProb = v;
+    }
+  } catch(_){ }
+  if (currentProb == null) currentProb = (typeof item.max_proba === 'number') ? item.max_proba : null;
+  renderPredHistogramOverlay(currentProb, posName);
   api(`/triplet/${itemId}`).then(trip=>{
     const hasAny = trip.items && (trip.items.target || trip.items.ref || trip.items.diff);
     if (!hasAny){
@@ -99,7 +117,7 @@ function showImageZoom(itemId){
   });
 }
 
-async function renderPredHistogramOverlay(currentProb){
+async function renderPredHistogramOverlay(currentProb, posClass){
   try {
     const overlay = el('#predHistOverlay');
     const canvas = el('#predHistCanvas');
@@ -108,7 +126,8 @@ async function renderPredHistogramOverlay(currentProb){
     const ctx = canvas.getContext('2d');
     ctx.clearRect(0,0,canvas.width, canvas.height);
 
-    const data = await api(`/predictions/histogram?bins=20`);
+    const q = posClass ? `/predictions/histogram?bins=20&class_name=${encodeURIComponent(posClass)}` : `/predictions/histogram?bins=20`;
+    const data = await api(q);
     const edges = data.edges || [];
     const counts = data.counts || [];
     const total = data.total || 0;
@@ -176,7 +195,8 @@ async function renderPredHistogramOverlay(currentProb){
     // label
     ctx.fillStyle = 'rgba(255,255,255,0.85)';
     ctx.font = '10px system-ui, sans-serif';
-    const lab = typeof currentProb === 'number' ? `p_max=${currentProb.toFixed(2)}  n=${total}` : `n=${total}`;
+    const metric = posClass ? `p(${posClass})` : 'p_max';
+    const lab = (typeof currentProb === 'number' && currentProb >= 0 && currentProb <= 1) ? `${metric}=${currentProb.toFixed(2)}  n=${total}` : `n=${total}`;
     ctx.fillText(lab, padL + 4, padT + 12);
   } catch(_){
     const overlay = el('#predHistOverlay');
@@ -466,10 +486,17 @@ function updatePagination(){
   const topPagination = el('#pagination-controls');
   const bottomPagination = el('#bottom-pagination');
   const pageIndicator = el('#page-indicator');
-  // Always show bottom pagination for controls, but hide top pagination and page indicator if only 1 page
-  if (topPagination) topPagination.style.display = showPagination ? 'flex' : 'none';
-  if (bottomPagination) bottomPagination.style.display = 'flex'; // Always show for page size/tile size controls
-  if (pageIndicator) pageIndicator.style.display = showPagination ? 'block' : 'none';
+  // In single mode, hide all pagination UI and repurpose bottom info as remaining counter
+  if (state.mode === 'single'){
+    if (topPagination) topPagination.style.display = 'none';
+    if (pageIndicator) pageIndicator.style.display = 'none';
+  } else {
+    // Show/hide based on grid pagination
+    if (topPagination) topPagination.style.display = showPagination ? 'flex' : 'none';
+    if (pageIndicator) pageIndicator.style.display = showPagination ? 'block' : 'none';
+  }
+  // Keep bottom container visible for controls (page size/tile size)
+  if (bottomPagination) bottomPagination.style.display = 'flex';
   if (pageIndicator) {
     const currentPageEl = el('#current-page');
     const totalPagesEl = el('#total-pages');
@@ -480,26 +507,36 @@ function updatePagination(){
   const endItem = Math.min(state.page * state.page_size, state.total_items);
   const topInfo = el('#pagination-info-text');
   const bottomInfo = el('#bottom-pagination-info');
-  if (topInfo) topInfo.textContent = `Page ${state.page} of ${state.total_pages}`;
-  if (bottomInfo) bottomInfo.textContent = `Showing ${startItem}-${endItem} of ${state.total_items} groups`;
+  if (state.mode === 'single'){
+    if (topInfo) topInfo.textContent = '';
+    // Prefer precise remaining counter if available; fallback to total-viewed
+    const total = (state.single_total_groups != null) ? state.single_total_groups : state.total_items;
+    const viewed = (state.single_groups && state.single_groups.length) ? state.single_groups.length : 0;
+    const fallbackRemaining = Math.max(0, (total || 0) - viewed);
+    const remaining = (typeof state.single_remaining_groups === 'number') ? Math.max(0, state.single_remaining_groups) : fallbackRemaining;
+    if (bottomInfo) bottomInfo.textContent = `Remaining: ${remaining} triplets`;
+  } else {
+    if (topInfo) topInfo.textContent = `Page ${state.page} of ${state.total_pages}`;
+    if (bottomInfo) bottomInfo.textContent = `Showing ${startItem}-${endItem} of ${state.total_items} triplets`;
+  }
   const isFirstPage = state.page <= 1;
   const isLastPage = state.page >= state.total_pages;
   const firstBtn = el('#first-page');
   const prevBtn = el('#prev-page');
   const nextBtn = el('#next-page');
   const lastBtn = el('#last-page');
-  if (firstBtn) firstBtn.disabled = isFirstPage;
-  if (prevBtn) prevBtn.disabled = isFirstPage;
-  if (nextBtn) nextBtn.disabled = isLastPage;
-  if (lastBtn) lastBtn.disabled = isLastPage;
+  if (firstBtn) firstBtn.disabled = state.mode === 'single' ? true : isFirstPage;
+  if (prevBtn) prevBtn.disabled = state.mode === 'single' ? true : isFirstPage;
+  if (nextBtn) nextBtn.disabled = state.mode === 'single' ? true : isLastPage;
+  if (lastBtn) lastBtn.disabled = state.mode === 'single' ? true : isLastPage;
   const bottomFirstBtn = el('#bottom-first-page');
   const bottomPrevBtn = el('#bottom-prev-page');
   const bottomNextBtn = el('#bottom-next-page');
   const bottomLastBtn = el('#bottom-last-page');
-  if (bottomFirstBtn) bottomFirstBtn.disabled = isFirstPage;
-  if (bottomPrevBtn) bottomPrevBtn.disabled = isFirstPage;
-  if (bottomNextBtn) bottomNextBtn.disabled = isLastPage;
-  if (bottomLastBtn) bottomLastBtn.disabled = isLastPage;
+  if (bottomFirstBtn) bottomFirstBtn.disabled = state.mode === 'single' ? true : isFirstPage;
+  if (bottomPrevBtn) bottomPrevBtn.disabled = state.mode === 'single' ? true : isFirstPage;
+  if (bottomNextBtn) bottomNextBtn.disabled = state.mode === 'single' ? true : isLastPage;
+  if (bottomLastBtn) bottomLastBtn.disabled = state.mode === 'single' ? true : isLastPage;
 }
 
 async function goToPage(page) {
@@ -520,7 +557,7 @@ function showHelp(){
 • X: Skip item ⏭️
 
 🚀 Actions:
-• R: Retrain model
+• T: Open TF Train
 • S: View statistics 📊
 • V: View map/visualization 🗺️
 • H or ?: Show this help
@@ -580,10 +617,10 @@ function updateSingleClassButtons(){
       btn.disabled = true;
       setTimeout(() => { btn.disabled = false; }, 500);
       
-      const grp = state.groups[state.groupIndex];
+      const grp = state.single_groups[state.groupIndex] || state.groups[state.groupIndex];
       if (!grp) return;
-      // Fire-and-forget to keep UI responsive; load refresh happens in background
-      batchLabelItems(grp.memberIds, cls.name, false, false).catch(()=>{});
+      // Fire-and-forget to keep UI responsive; suppress background reload to avoid double refresh
+      batchLabelItems(grp.memberIds, cls.name, false, false, false).catch(()=>{});
       advanceSingleNext();
     });
     container.appendChild(btn);
@@ -612,11 +649,15 @@ async function renderSingleView(){
     } catch(_){ }
     return;
   }
-  const grp = state.groups[state.groupIndex];
+  // Ensure single buffer has enough groups for requested index
+  if (typeof ensureSingleHasIndex === 'function') { await ensureSingleHasIndex(state.groupIndex); }
+  const grp = state.single_groups[state.groupIndex];
   const repId = grp ? grp.repId : undefined;
-  // Track stable key so background reloads can re-align the current group
+  // Track stable key for navigation memory
   if (grp && grp.key) state.currentGroupKey = grp.key;
-  const item = repId ? state.items.find(i=>i.id===repId) || state.items[0] : state.items[0];
+  // Find representative item in single buffer first, fallback to global items if needed
+  const allItems = (state.single_items && state.single_items.length) ? state.single_items : state.items;
+  const item = repId ? allItems.find(i=>i.id===repId) || allItems[0] : allItems[0];
   if (!item){
     el('#single-img')?.setAttribute('src','');
     const fn = el('#single-filename'); if (fn) fn.textContent = '';
@@ -625,7 +666,22 @@ async function renderSingleView(){
     return;
   }
   const filename = item.path ? item.path.split('/').pop() : `ID ${item.id}`;
-  const pred = item.pred_label ? `pred: ${item.pred_label}` : '';
+  // Build prediction and existing label string
+  let pred = '';
+  try {
+    const labelName = item && item.pred_label;
+    const probValue = (labelName && item && item.probs && Object.prototype.hasOwnProperty.call(item.probs, labelName))
+      ? item.probs[labelName]
+      : (item && typeof item.max_proba === 'number') ? item.max_proba : null;
+    pred = labelName ? `pred: ${labelName}${(probValue != null) ? ` (${Number(probValue).toFixed(2)})` : ''}` : '';
+  } catch(_){ }
+  // If already labeled, show it explicitly
+  try {
+    const lbl = (item && item.label) ? String(item.label) : '';
+    if (lbl){
+      pred = pred ? `${pred}   •   label: ${lbl}` : `label: ${lbl}`;
+    }
+  } catch(_){ }
   const fn = el('#single-filename'); if (fn) fn.textContent = filename;
   const pr = el('#single-pred'); if (pr) pr.textContent = pred;
 
@@ -656,55 +712,13 @@ async function renderSingleView(){
         <img id=\"singleTarget\" style=\"display:block; width:100%; height:${vh}; object-fit: contain; margin:0; padding:0; border:0; outline:0; box-shadow:none; vertical-align:top;\" />
         <img id=\"singleRef\" style=\"display:block; width:100%; height:${vh}; object-fit: contain; margin:0; padding:0; border:0; outline:0; box-shadow:none; vertical-align:top;\" />
         <img id=\"singleDiff\" style=\"display:block; width:100%; height:${vh}; object-fit: contain; margin:0; padding:0; border:0; outline:0; box-shadow:none; vertical-align:top;\" />
-        <span id="tripletLabel" style="position:absolute; right:12px; bottom:8px; padding:4px 8px; font-weight:700; font-size:14px; border-radius:4px; background: rgba(0,0,0,0.5); color:#fff; pointer-events:none; display:none;"></span>
       </div>`;
     const t = el('#singleTarget'); const r = el('#singleRef'); const d = el('#singleDiff');
     if (t) t.src = trip.items.target?.file || '';
     if (r) r.src = trip.items.ref?.file || '';
     if (d) d.src = trip.items.diff?.file || '';
-    // Click-cycling for triplet with bottom-right label in class color
-    try {
-      let currentIdx = -1;
-      const imgs = [t, r, d].filter(Boolean);
-      const labelEl = el('#tripletLabel');
-      const applyTripletClass = (idx)=>{
-        currentIdx = idx;
-        const color = (typeof getClassColorByIndex === 'function' && idx >= 0) ? getClassColorByIndex(idx) : null;
-        imgs.forEach(img=>{
-          if (!img) return;
-          if (!color){
-            img.style.outline = '0';
-            img.style.outlineOffset = '0';
-            img.style.boxShadow = 'none';
-          } else {
-            img.style.outline = `3px solid ${color}`;
-            img.style.outlineOffset = '-3px';
-            img.style.boxShadow = `0 0 0 2px ${hexToRgba(color, 0.25)} inset`;
-          }
-        });
-        if (labelEl){
-          const name = (idx >= 0 && state.classes && state.classes[idx] && state.classes[idx].name) ? state.classes[idx].name : '';
-          if (name && color){
-            labelEl.textContent = name;
-            labelEl.style.color = color;
-            labelEl.style.display = 'inline-block';
-          } else {
-            labelEl.textContent = '';
-            labelEl.style.display = 'none';
-          }
-        }
-      };
-      const cycle = ()=>{
-        const n = (state.classes || []).length;
-        if (n <= 0){ 
-          status('⚠️ Please define classes first before labeling images. Go to the Classes tab to set up your classification labels.');
-          return; 
-        }
-        const next = (currentIdx + 1) >= n ? -1 : (currentIdx + 1);
-        applyTripletClass(next);
-      };
-      imgs.forEach(img=>{ img && img.addEventListener('click', cycle); });
-    } catch(_){ }
+    // In single view, disable image click interactions and overlays
+    try { if (t) t.style.pointerEvents = 'none'; if (r) r.style.pointerEvents = 'none'; if (d) d.style.pointerEvents = 'none'; } catch(_){ }
   }).catch(()=>{});
 
   // Prefetch next images to reduce latency
@@ -715,19 +729,14 @@ async function renderSingleView(){
 
 async function navigateSingle(delta){
   const nextIndex = state.groupIndex + delta;
-  if (nextIndex >= 0 && nextIndex < state.groups.length){
-    state.groupIndex = nextIndex;
-    await renderSingleView();
-    return;
+  if (nextIndex < 0) return;
+  // Ensure buffer has nextIndex available; try to fetch more if moving forward
+  if (delta > 0 && typeof ensureSingleHasIndex === 'function') {
+    await ensureSingleHasIndex(nextIndex);
   }
-  // Cross page navigation if available
-  if (delta > 0 && state.page < state.total_pages){
-    state.groupIndex = 0;
-    await goToPage(state.page + 1);
-    await renderSingleView();
-  } else if (delta < 0 && state.page > 1){
-    await goToPage(state.page - 1);
-    state.groupIndex = Math.max(0, (state.groups.length || 1) - 1);
+  // Clamp to available range (no paging)
+  if (nextIndex >= 0 && nextIndex < state.single_groups.length){
+    state.groupIndex = nextIndex;
     await renderSingleView();
   }
 }

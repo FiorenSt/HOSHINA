@@ -9,6 +9,13 @@ let trainingState = {
   totalSteps: 0,
   startTime: null,
   statusTimer: null,
+  // status bar
+  status: {
+    message: 'Idle',
+    stage: 'idle', // idle | preparing | training | testing | exporting | predicting | error | done
+    percent: 0,
+    etaMs: null
+  },
   charts: {},
   metrics: {
     loss: [],
@@ -16,7 +23,10 @@ let trainingState = {
     valLoss: [],
     valAccuracy: []
   },
-  classMap: {}
+  classMap: {},
+  classWeight: {},
+  // Prediction histogram settings
+  histLogScale: false
 };
 
 // Determine the positive class name from training target mapping
@@ -26,6 +36,7 @@ function getPositiveClassName(){
     if (!entries.length) return '';
     const targets = Array.from(new Set(entries.map(([,v])=> Number(v))));
     if (targets.length === 2 && targets.includes(0) && targets.includes(1)){
+      // Positive class should be target 1 in binary setups
       const pos = entries.find(([,v])=> Number(v) === 1);
       return pos ? String(pos[0]) : '';
     }
@@ -81,6 +92,15 @@ async function initializeTrainingDashboard() {
     // Setup slider interactions
     setupSliderInteractions();
     
+    // Ensure classes are available for bulk assign select
+    try {
+      if (!Array.isArray(window.state?.classes) || window.state.classes.length === 0) {
+        if (typeof window.loadClasses === 'function') {
+          await window.loadClasses();
+        }
+      }
+    } catch(_){ }
+
     // Initialize charts
     initializeCharts();
     // Initialize prediction panel
@@ -91,6 +111,8 @@ async function initializeTrainingDashboard() {
     
     // Add initial log entry
     addLogEntry('info', 'Training dashboard initialized successfully');
+    // Initialize status bar UI
+    updateInlineStatusBar();
     
   } catch (error) {
     console.error('Failed to initialize training dashboard:', error);
@@ -124,6 +146,17 @@ async function loadTrainingOptions() {
         modelSelect.value = data.defaults.model;
       }
     }
+
+    // Populate loss dropdown
+    const lossSelect = document.getElementById('train-loss');
+    if (lossSelect && Array.isArray(data.losses)) {
+      lossSelect.innerHTML = '';
+      data.losses.forEach(ls => {
+        const opt = document.createElement('option');
+        opt.value = ls.id; opt.textContent = ls.name || ls.id;
+        lossSelect.appendChild(opt);
+      });
+    }
     
     // Set other defaults
     if (data.defaults) {
@@ -142,6 +175,7 @@ async function loadTrainingOptions() {
         updateSliderValue('batch-size', batchSize.value);
       }
       if (augment) augment.checked = data.defaults.augment || false;
+      if (lossSelect && data.defaults.loss) lossSelect.value = data.defaults.loss;
       // show/hide single-role group based on default mode
       toggleSingleRoleVisibility();
       const sr = document.getElementById('single-role');
@@ -189,8 +223,10 @@ async function loadDatasetSummary() {
 
 function buildLabelMappingUI(labels) {
   const host = document.getElementById('label-mapping-list');
+  const cwHost = document.getElementById('class-weight-list');
   if (!host) return;
   const existing = trainingState.classMap || {};
+  const existingCW = trainingState.classWeight || {};
   // Default: enable all except Unknown/Unlabeled; assign incremental ints starting at 0
   const normalized = labels.slice();
   const defaultOrder = normalized;
@@ -202,6 +238,10 @@ function buildLabelMappingUI(labels) {
     if (enabled) defaultMap[name] = nextVal++;
   });
   trainingState.classMap = Object.keys(existing).length ? existing : defaultMap;
+  // Initialize class weights for active classes (default 1.0)
+  const initCW = {};
+  Object.keys(trainingState.classMap).forEach(name => { initCW[trainingState.classMap[name]] = (existingCW?.[trainingState.classMap[name]] ?? 1.0); });
+  trainingState.classWeight = initCW;
   host.innerHTML = '';
   // headers
   const header = document.createElement('div'); header.className = 'lm-row';
@@ -230,12 +270,16 @@ function buildLabelMappingUI(labels) {
         const existingVal = parseInt(valInput.value, 10);
         const val = Number.isFinite(existingVal) ? existingVal : 0;
         trainingState.classMap[name] = val;
+        trainingState.classWeight[val] = trainingState.classWeight[val] ?? 1.0;
         if (valInput) valInput.disabled = false;
       } else {
+        const prevVal = trainingState.classMap[name];
         delete trainingState.classMap[name];
+        if (prevVal in trainingState.classWeight) delete trainingState.classWeight[prevVal];
         if (valInput) valInput.disabled = true;
       }
       try { if (typeof drawTestHistogram === 'function') drawTestHistogram(); } catch(_){}
+      if (cwHost) renderClassWeightUI(cwHost);
     });
   });
   host.querySelectorAll('input[type="number"]').forEach(inp => {
@@ -243,7 +287,39 @@ function buildLabelMappingUI(labels) {
       const name = e.target.getAttribute('data-lm-value');
       const val = parseInt(e.target.value, 10);
       if (Number.isFinite(val)) {
+        const old = trainingState.classMap[name];
         trainingState.classMap[name] = val;
+        if (old in trainingState.classWeight && !(val in trainingState.classWeight)){
+          trainingState.classWeight[val] = trainingState.classWeight[old];
+          delete trainingState.classWeight[old];
+        }
+      }
+    });
+  });
+  if (cwHost) renderClassWeightUI(cwHost);
+}
+
+function renderClassWeightUI(host){
+  const active = Object.entries(trainingState.classMap).sort((a,b)=> Number(a[1]) - Number(b[1]));
+  host.innerHTML = '';
+  const header = document.createElement('div'); header.className = 'lm-row';
+  header.innerHTML = '<div class="lm-header">Class (target)</div><div class="lm-header">Weight</div>';
+  host.appendChild(header);
+  active.forEach(([name, idx]) => {
+    const row = document.createElement('div'); row.className = 'lm-row';
+    const curW = Number(trainingState.classWeight?.[idx] ?? 1.0);
+    row.innerHTML = `
+      <div class="lm-label">${name} ( ${idx} )</div>
+      <div class="lm-value"><input type="number" step="0.1" min="0" value="${curW}" data-cw-idx="${idx}"></div>
+    `;
+    host.appendChild(row);
+  });
+  host.querySelectorAll('input[data-cw-idx]').forEach(inp => {
+    inp.addEventListener('input', (e) => {
+      const idx = parseInt(e.target.getAttribute('data-cw-idx'), 10);
+      const val = parseFloat(e.target.value);
+      if (Number.isFinite(idx) && Number.isFinite(val)){
+        trainingState.classWeight[idx] = val;
       }
     });
   });
@@ -254,7 +330,18 @@ function setupTrainingEventListeners() {
   // Navigation
   const backBtn = document.getElementById('back-to-main');
   if (backBtn) {
-    backBtn.addEventListener('click', hideTrainingDashboard);
+    backBtn.addEventListener('click', async () => {
+      try{
+        hideTrainingDashboard();
+        if (typeof window.loadItems === 'function'){
+          await window.loadItems();
+        } else if (typeof loadItems === 'function'){
+          await loadItems();
+        }
+        const grid = document.getElementById('grid');
+        if (grid) grid.scrollIntoView({ behavior: 'smooth' });
+      } catch(_){ hideTrainingDashboard(); }
+    });
   }
   const returnBtn = document.getElementById('return-to-labeling');
   if (returnBtn){
@@ -329,11 +416,41 @@ function setupTrainingEventListeners() {
       const limitVal = (!allRemaining && limitInput) ? parseInt(limitInput.value || '300') : null;
       try {
         runPredictBtn.disabled = true;
-        const body = { repredict_all: repredict };
-        if (!allRemaining && Number.isFinite(limitVal) && limitVal > 0) { body.limit = limitVal; }
-        const r = await fetch('/api/predictions/run', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body) });
-        const data = await r.json();
-        if (!data.ok){ addLogEntry('warning', data.msg || 'Prediction run returned'); } else { addLogEntry('success', `Predicted ${data.predicted} triplet groups`); }
+        if (allRemaining){
+          // Use background batch runner and poll status, refreshing UI after each batch
+          const bs = 200;
+          const r0 = await fetch('/api/predictions/run/start', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ repredict_all: repredict, batch_size: bs }) });
+          const d0 = await r0.json();
+          if (!d0.ok){ addLogEntry('warning', d0.msg || 'Failed to start batch prediction'); return; }
+          addLogEntry('info', `Batch prediction started (batch size ${bs})`);
+          let lastProcessed = -1;
+          const batchEl = document.getElementById('pred-batch-status');
+          if (batchEl) { batchEl.style.display = 'block'; batchEl.textContent = 'Batch 0/0'; }
+          while (true){
+            const stResp = await fetch('/api/predictions/run/status');
+            const st = await stResp.json();
+            if (batchEl && typeof st.current_batch === 'number' && typeof st.total_batches === 'number'){
+              batchEl.textContent = `Batch ${st.current_batch}/${st.total_batches}`;
+            }
+            if (typeof st.processed_groups === 'number' && st.processed_groups !== lastProcessed){
+              lastProcessed = st.processed_groups;
+              try { await refreshPredictionSummary(); await drawPredictionHistogram(); await drawTestHistogram(); } catch(_){ }
+            }
+            if (!st.running){
+              addLogEntry(st.message === 'Done' ? 'success' : (st.message === 'Cancelled' ? 'warning' : 'info'), st.message || 'Prediction run finished');
+              if (batchEl) { batchEl.style.display = 'none'; }
+              break;
+            }
+            await new Promise(res => setTimeout(res, 1500));
+          }
+        } else {
+          // One-shot run with optional limit
+          const body = { repredict_all: repredict };
+          if (Number.isFinite(limitVal) && limitVal > 0) { body.limit = limitVal; }
+          const r = await fetch('/api/predictions/run', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body) });
+          const data = await r.json();
+          if (!data.ok){ addLogEntry('warning', data.msg || 'Prediction run returned'); } else { addLogEntry('success', `Predicted ${data.predicted} triplets`); }
+        }
       } catch(e){ addLogEntry('error', `Prediction failed: ${e.message}`); }
       finally { runPredictBtn.disabled = false; }
       await refreshPredictionSummary();
@@ -386,6 +503,36 @@ function setupTrainingEventListeners() {
       finally{ applyBtn.disabled = false; }
     });
   }
+
+  // Populate bulk class select with available classes
+  try {
+    const sel = document.getElementById('bulk-class-select');
+    if (sel) {
+      sel.innerHTML = '';
+      const classes = (Array.isArray(window.state?.classes) ? window.state.classes : []);
+      classes.forEach((c)=>{
+        const opt = document.createElement('option');
+        opt.value = c.name;
+        opt.textContent = c.name;
+        sel.appendChild(opt);
+      });
+      // If none loaded yet, listen for update and repopulate
+      if (classes.length === 0){
+        const repopulate = ()=>{
+          try {
+            const cl = (Array.isArray(window.state?.classes) ? window.state.classes : []);
+            sel.innerHTML = '';
+            cl.forEach((c)=>{
+              const opt = document.createElement('option'); opt.value = c.name; opt.textContent = c.name; sel.appendChild(opt);
+            });
+          } catch(_){}
+        };
+        document.addEventListener('al:classes-updated', repopulate, { once: true });
+      }
+    }
+  } catch(_){ }
+
+  // Bulk assign handler moved to main page modal
 }
 
 // Setup slider interactions
@@ -446,6 +593,8 @@ async function initPredictionPanel(){
     await refreshPredictionSummary();
     await drawPredictionHistogram();
     await drawTestHistogram();
+    // Ensure toggle buttons exist and are wired
+    setupHistogramScaleToggles();
   } catch(e){ console.warn('initPredictionPanel failed', e); }
 }
 
@@ -456,6 +605,15 @@ async function refreshPredictionSummary(){
     updateElement('pred-remaining', d.remaining ?? '-');
     updateElement('pred-done', d.predicted ?? '-');
     updateElement('pred-total', d.total_items ?? '-');
+    // If any predictions exist, persist a flag and notify main UI
+    try {
+      const hasAny = typeof d.predicted === 'number' ? (d.predicted > 0) : false;
+      if (hasAny) {
+        if (typeof setPredictionsAvailableFlag === 'function') setPredictionsAvailableFlag(true);
+        localStorage.setItem('al_predictions_available', '1');
+        document.dispatchEvent(new CustomEvent('al:predictions-available'));
+      }
+    } catch(_){ }
   } catch(e){
     updateElement('pred-remaining', '-');
   }
@@ -472,13 +630,18 @@ async function drawPredictionHistogram(){
     const q = pos ? `?bins=40&class_name=${encodeURIComponent(pos)}` : `?bins=40`;
     const data = await (await fetch('/api/predictions/histogram' + q)).json();
     const edges = data.edges || []; const counts = data.counts || []; const total = data.total || 0;
-    const w = canvas.width, h = canvas.height; const padL=30,padR=10,padT=10,padB=20; const plotW=w-padL-padR, plotH=h-padT-padB;
+    const w = canvas.width, h = canvas.height; const padL=38,padR=10,padT=10,padB=24; const plotW=w-padL-padR, plotH=h-padT-padB;
     // axes
     ctx.strokeStyle = '#374151'; ctx.beginPath(); ctx.moveTo(padL,padT); ctx.lineTo(padL,padT+plotH); ctx.lineTo(padL+plotW,padT+plotH); ctx.stroke();
     if (!(edges.length && counts.length)) return;
-    const maxC = Math.max(1, ...counts); const binW = plotW / counts.length;
+    const useLog = !!trainingState.histLogScale;
+    const maxC = Math.max(1, ...counts);
+    const maxCLog = Math.log10(maxC + 1);
+    const binW = plotW / counts.length;
     for (let i=0;i<counts.length;i++){
-      const bh = (counts[i]/maxC)*plotH; const x = padL + i*binW + 1; const y = padT + plotH - bh;
+      const c = counts[i] || 0;
+      const norm = useLog ? (Math.log10(c + 1) / Math.max(1e-9, maxCLog)) : (c / Math.max(1, maxC));
+      const bh = norm * plotH; const x = padL + i*binW + 1; const y = padT + plotH - bh;
       ctx.fillStyle = 'rgba(56,189,248,0.75)'; ctx.fillRect(x,y, Math.max(1,binW-2), Math.max(1,bh));
     }
     // x-axis ticks 0..1
@@ -496,11 +659,32 @@ async function drawPredictionHistogram(){
       ctx.fillText(lab, x, y + 14);
     }
     ctx.restore();
+    // y-axis ticks and labels for counts
+    ctx.save();
+    ctx.strokeStyle = '#4b5563';
+    ctx.fillStyle = '#9ca3af';
+    ctx.font = '10px Arial';
+    ctx.textAlign = 'right';
+    const yTicks = 5;
+    for (let i=0;i<=yTicks;i++){
+      const r = i / yTicks;
+      const y = padT + (1 - r) * plotH;
+      ctx.beginPath(); ctx.moveTo(padL - 4, y); ctx.lineTo(padL, y); ctx.stroke();
+      let labelVal;
+      if (useLog){
+        labelVal = Math.pow(10, r * maxCLog) - 1;
+      } else {
+        labelVal = r * maxC;
+      }
+      const lab = (labelVal >= 1000) ? Math.round(labelVal).toString() : labelVal.toFixed(0);
+      ctx.fillText(lab, padL - 6, y + 3);
+    }
+    ctx.restore();
     // threshold marker
     const xThr = padL + Math.max(0, Math.min(1, thrVal)) * plotW;
     ctx.save(); ctx.setLineDash([5,3]); ctx.strokeStyle = '#f59e0b'; ctx.beginPath(); ctx.moveTo(xThr,padT); ctx.lineTo(xThr,padT+plotH); ctx.stroke(); ctx.restore();
     // label
-    const labelText = pos ? `${pos}  n=${total}  thr=${thrVal.toFixed(2)}` : `p_max  n=${total}  thr=${thrVal.toFixed(2)}`;
+    const labelText = pos ? `${pos}  n=${total}  thr=${thrVal.toFixed(2)}  y=${useLog ? 'log' : 'lin'}` : `p_max  n=${total}  thr=${thrVal.toFixed(2)}  y=${useLog ? 'log' : 'lin'}`;
     ctx.fillStyle = '#9ca3af'; ctx.font = '12px Arial'; ctx.fillText(labelText, padL+4, padT+12);
   } catch(e){ /* ignore */ }
 }
@@ -521,7 +705,7 @@ async function drawTestHistogram(){
     // Filter to active training labels only
     const activeNames = Object.keys(trainingState.classMap || {});
     labels = labels.filter(n => activeNames.includes(n));
-    const w = canvas.width, h = canvas.height; const padL=30,padR=10,padT=10,padB=20; const plotW=w-padL-padR, plotH=h-padT-padB;
+    const w = canvas.width, h = canvas.height; const padL=38,padR=10,padT=10,padB=24; const plotW=w-padL-padR, plotH=h-padT-padB;
     // axes
     ctx.strokeStyle = '#374151'; ctx.beginPath(); ctx.moveTo(padL,padT); ctx.lineTo(padL,padT+plotH); ctx.lineTo(padL+plotW,padT+plotH); ctx.stroke();
     // prepare stacked bars
@@ -534,7 +718,9 @@ async function drawTestHistogram(){
     for (let i=0;i<binCount;i++){
       let s = 0; for (const k of keys){ s += (byLabel[k][i]||0); } stackSums[i]=s;
     }
+    const useLog = !!trainingState.histLogScale;
     const maxC = Math.max(1, ...stackSums);
+    const maxCLog = Math.log10(maxC + 1);
     // colors from class palette
     const getColor = (idx) => {
       if (typeof getClassColorByIndex === 'function'){ return getClassColorByIndex(idx); }
@@ -556,28 +742,57 @@ async function drawTestHistogram(){
       ctx.fillText(lab, x, y + 14);
     }
     ctx.restore();
-    // draw stacked bars
+    // draw stacked bars without contours/outlines
+    ctx.save();
+    ctx.lineWidth = 0;
+    ctx.strokeStyle = 'rgba(0,0,0,0)';
+    // disable smoothing to reduce anti-aliased edges between segments
+    try { ctx.imageSmoothingEnabled = false; } catch(_) {}
     for (let i=0;i<binCount;i++){
       let acc = 0;
+      // snap bar x/width to integer pixels; remove inter-bar gaps
+      const barX = Math.round(padL + i * binW);
+      const barW = Math.max(1, Math.round(binW));
       for (let li=0; li<keys.length; li++){
         const k = keys[li];
         const c = byLabel[k][i] || 0;
-        const hpx = (c / maxC) * plotH;
-        const x = padL + i*binW + 1;
+        const norm = useLog ? (Math.log10(c + 1) / Math.max(1e-9, maxCLog)) : (c / Math.max(1, maxC));
+        const hpx = norm * plotH;
         const y = padT + plotH - acc - hpx;
         const col = getColor(li);
         ctx.fillStyle = col;
-        ctx.globalAlpha = 0.8;
-        ctx.fillRect(x, y, Math.max(1, binW - 2), Math.max(1, hpx));
         ctx.globalAlpha = 1.0;
+        ctx.fillRect(barX, Math.round(y), barW, Math.max(1, Math.round(hpx)));
         acc += hpx;
       }
     }
+    ctx.restore();
+    // y-axis ticks and labels for counts
+    ctx.save();
+    ctx.strokeStyle = '#4b5563';
+    ctx.fillStyle = '#9ca3af';
+    ctx.font = '10px Arial';
+    ctx.textAlign = 'right';
+    const yTicks = 5;
+    for (let i=0;i<=yTicks;i++){
+      const r = i / yTicks;
+      const y = padT + (1 - r) * plotH;
+      ctx.beginPath(); ctx.moveTo(padL - 4, y); ctx.lineTo(padL, y); ctx.stroke();
+      let labelVal;
+      if (useLog){
+        labelVal = Math.pow(10, r * maxCLog) - 1;
+      } else {
+        labelVal = r * maxC;
+      }
+      const lab = (labelVal >= 1000) ? Math.round(labelVal).toString() : labelVal.toFixed(0);
+      ctx.fillText(lab, padL - 6, y + 3);
+    }
+    ctx.restore();
     // threshold marker
     const xThr = padL + Math.max(0, Math.min(1, thrVal)) * plotW;
     ctx.save(); ctx.setLineDash([5,3]); ctx.strokeStyle = '#f59e0b'; ctx.beginPath(); ctx.moveTo(xThr,padT); ctx.lineTo(xThr,padT+plotH); ctx.stroke(); ctx.restore();
     // label
-    const labelText = pos ? `${pos} test  n=${total}  thr=${thrVal.toFixed(2)}` : `p_max test  n=${total}  thr=${thrVal.toFixed(2)}`;
+    const labelText = pos ? `${pos} test  n=${total}  thr=${thrVal.toFixed(2)}  y=${useLog ? 'log' : 'lin'}` : `p_max test  n=${total}  thr=${thrVal.toFixed(2)}  y=${useLog ? 'log' : 'lin'}`;
     ctx.fillStyle = '#9ca3af'; ctx.font = '12px Arial'; ctx.fillText(labelText, padL+4, padT+12);
     // legend
     const legend = document.getElementById('pred-test-legend');
@@ -648,12 +863,16 @@ async function startTraining() {
     
     updateTrainingControls();
     updateStatusIndicator('preparing');
+    trainingState.status = { stage: 'preparing', message: 'Preparing…', percent: 0, etaMs: null };
+    updateInlineStatusBar();
     
     addLogEntry('success', 'Training started successfully');
     
   } catch (error) {
     console.error('Failed to start training:', error);
     addLogEntry('error', `Failed to start training: ${error.message}`);
+    trainingState.status = { stage: 'error', message: error.message || 'Error', percent: 0, etaMs: null };
+    updateInlineStatusBar();
   }
 }
 
@@ -676,12 +895,16 @@ async function stopTraining() {
     trainingState.isTraining = false;
     updateTrainingControls();
     updateStatusIndicator('idle');
+    trainingState.status = { stage: 'idle', message: 'Idle', percent: 0, etaMs: null };
+    updateInlineStatusBar();
     
     addLogEntry('warning', 'Training stopped by user');
     
   } catch (error) {
     console.error('Failed to stop training:', error);
     addLogEntry('error', `Failed to stop training: ${error.message}`);
+    trainingState.status = { stage: 'error', message: error.message || 'Error', percent: 0, etaMs: null };
+    updateInlineStatusBar();
   }
 }
 
@@ -694,6 +917,8 @@ function getTrainingConfig() {
     batch_size: parseInt(document.getElementById('train-batch-size')?.value || '32'),
     augment: document.getElementById('train-augment')?.checked || false,
     class_map: trainingState.classMap || {},
+    loss: document.getElementById('train-loss')?.value || 'sparse_categorical_crossentropy',
+    class_weight: trainingState.classWeight || {},
     split_pct: parseInt(document.getElementById('train-split')?.value || '85'),
     split_strategy: document.getElementById('split-strategy')?.value || 'natural',
     single_role: document.getElementById('single-role')?.value || 'target'
@@ -731,11 +956,17 @@ function updateStatusIndicator(status) {
       idle: 'Ready to Train',
       preparing: 'Preparing...',
       training: 'Training in Progress',
+      testing: 'Testing Model',
+      exporting: 'Exporting Model',
+      predicting: 'Running Predictions',
       error: 'Error Occurred',
       done: 'Training Complete'
     };
     statusText.textContent = statusMap[status] || 'Unknown Status';
   }
+  // also mirror to inline status
+  trainingState.status.stage = status;
+  updateInlineStatusBar();
 }
 
 // Start status polling
@@ -773,6 +1004,23 @@ async function updateTrainingStatus() {
       trainingState.currentEpoch = status.epoch || 0;
       trainingState.totalEpochs = status.total_epochs || 0;
       
+      // Update inline status details
+      if (typeof status.progress_pct === 'number') {
+        trainingState.status.percent = status.progress_pct;
+      } else {
+        const pct = trainingState.totalEpochs > 0 ? (trainingState.currentEpoch / Math.max(1, trainingState.totalEpochs)) * 100 : 0;
+        trainingState.status.percent = pct;
+      }
+      if (typeof status.eta_sec === 'number') {
+        trainingState.status.etaMs = Math.max(0, status.eta_sec) * 1000;
+      } else if (trainingState.startTime && trainingState.currentEpoch > 0) {
+        const elapsed = Date.now() - trainingState.startTime;
+        const avg = elapsed / Math.max(1, trainingState.currentEpoch);
+        trainingState.status.etaMs = (Math.max(0, trainingState.totalEpochs - trainingState.currentEpoch)) * avg;
+      }
+      trainingState.status.message = (status.message || 'Training');
+      updateInlineStatusBar();
+      
       updateProgress();
       updateMetrics(status);
       updateCharts(status);
@@ -782,9 +1030,11 @@ async function updateTrainingStatus() {
       updateTrainingControls();
       
       if (status.stage === 'done') {
-        addLogEntry('success', 'Training completed successfully');
+        addLogEntry('success', 'Training completed successfully — Ready for prediction');
+        trainingState.status = { stage: 'done', message: 'Ready for prediction', percent: 100, etaMs: 0 };
+        updateInlineStatusBar();
         // refresh predict panel after training
-        try { await refreshPredictionSummary(); await drawPredictionHistogram(); await drawTestHistogram(); } catch(_){}
+        try { await refreshPredictionSummary(); await drawPredictionHistogram(); await drawTestHistogram(); } catch(_){ }
         // Reveal the return-to-main button after successful training
         try {
           const returnBtn2 = document.getElementById('return-to-labeling');
@@ -792,8 +1042,12 @@ async function updateTrainingStatus() {
         } catch(_){ }
       } else if (status.stage === 'error') {
         addLogEntry('error', `Training failed: ${status.message || 'Unknown error'}`);
+        trainingState.status = { stage: 'error', message: status.message || 'Error', percent: 0, etaMs: null };
+        updateInlineStatusBar();
       } else if (status.stage === 'cancelled') {
         addLogEntry('warning', 'Training was cancelled');
+        trainingState.status = { stage: 'idle', message: 'Cancelled', percent: 0, etaMs: null };
+        updateInlineStatusBar();
       }
     }
     
@@ -827,6 +1081,35 @@ function updateProgressBar(id, percentage) {
   if (progressBar) {
     progressBar.style.width = `${Math.max(0, Math.min(100, percentage))}%`;
     progressBar.textContent = `${Math.round(percentage)}%`;
+  }
+}
+
+// Unified inline status bar updater
+function updateInlineStatusBar(){
+  const msgEl = document.getElementById('train-status-msg');
+  const extraEl = document.getElementById('train-status-extra');
+  const bar = document.getElementById('train-status-progress');
+  if (!msgEl || !extraEl || !bar) return;
+  const st = trainingState.status || {};
+  const stage = st.stage || 'idle';
+  msgEl.textContent = stage === 'idle' ? 'Idle' : (st.message || stage);
+  // ETA text
+  const etaText = (typeof st.etaMs === 'number' && st.etaMs >= 0) ? `ETA ${formatTime(st.etaMs)}` : '';
+  const stageLabel = stage.charAt(0).toUpperCase() + stage.slice(1);
+  extraEl.textContent = [stageLabel, etaText].filter(Boolean).join(' • ');
+  if (stage === 'preparing' || stage === 'testing' || stage === 'exporting' || stage === 'predicting'){
+    bar.classList.add('indeterminate');
+    bar.style.width = '100%';
+    bar.textContent = '';
+  } else if (stage === 'training' || stage === 'done'){
+    bar.classList.remove('indeterminate');
+    const pct = Math.max(0, Math.min(100, Number(st.percent) || 0));
+    bar.style.width = `${pct}%`;
+    bar.textContent = `${Math.round(pct)}%`;
+  } else {
+    bar.classList.remove('indeterminate');
+    bar.style.width = '0%';
+    bar.textContent = '0%';
   }
 }
 
@@ -886,14 +1169,30 @@ function updateDualSeriesChart(chartId, seriesA, seriesB, label, colorA, colorB)
   const minValue = allValues.length ? Math.min(...allValues) : 0;
   const maxValue = allValues.length ? Math.max(...allValues) : 1;
   const valueRange = maxValue - minValue || 1;
+  // Grid lines + Y-axis ticks and labels
   ctx.strokeStyle = '#374151';
   ctx.lineWidth = 1;
+  ctx.fillStyle = '#9ca3af';
+  ctx.font = '10px Arial';
+  ctx.textAlign = 'right';
   for (let i = 0; i <= 5; i++) {
-    const y = padding + (i / 5) * chartHeight;
+    const ratio = i / 5;
+    const y = padding + ratio * chartHeight;
+    // horizontal grid line
     ctx.beginPath();
     ctx.moveTo(padding, y);
     ctx.lineTo(width - padding, y);
     ctx.stroke();
+    // left tick mark
+    ctx.beginPath();
+    ctx.moveTo(padding - 4, y);
+    ctx.lineTo(padding, y);
+    ctx.stroke();
+    // label for current value
+    const valueAtY = maxValue - ratio * valueRange;
+    const decimals = valueRange < 1 ? 3 : (valueRange < 10 ? 2 : 1);
+    const label = Number.isFinite(valueAtY) ? valueAtY.toFixed(decimals) : '0';
+    ctx.fillText(label, padding - 6, y + 3);
   }
   const drawSeries = (data, color) => {
     if (!data || data.length < 1) return;
@@ -958,6 +1257,8 @@ async function saveModel() {
 
 async function exportModel() {
   try {
+    trainingState.status = { stage: 'exporting', message: 'Exporting model…', percent: 0, etaMs: null };
+    updateInlineStatusBar();
     const response = await fetch('/api/export-model');
     if (response.ok) {
       const blob = await response.blob();
@@ -969,18 +1270,35 @@ async function exportModel() {
       window.URL.revokeObjectURL(url);
       
       addLogEntry('success', 'Model exported successfully');
+      trainingState.status = { stage: 'idle', message: 'Export complete', percent: 0, etaMs: null };
+      updateInlineStatusBar();
     } else {
       throw new Error('Failed to export model');
     }
   } catch (error) {
     console.error('Export error:', error);
     addLogEntry('error', `Export failed: ${error.message}`);
+    trainingState.status = { stage: 'error', message: error.message || 'Export failed', percent: 0, etaMs: null };
+    updateInlineStatusBar();
   }
 }
 
 async function testModel() {
   addLogEntry('info', 'Testing model performance...');
-  // Implementation would test model on validation set
+  trainingState.status = { stage: 'testing', message: 'Testing…', percent: 0, etaMs: null };
+  updateInlineStatusBar();
+  try{
+    const r = await fetch('/api/train/test', { method: 'POST' });
+    const d = await r.json();
+    if (!d.ok){ throw new Error(d.msg || 'Test failed'); }
+    addLogEntry('success', `Test complete. Accuracy ${(d.acc*100).toFixed(1)}%`);
+    trainingState.status = { stage: 'idle', message: 'Test complete', percent: 0, etaMs: null };
+  } catch(e){
+    addLogEntry('error', `Test failed: ${e.message}`);
+    trainingState.status = { stage: 'error', message: e.message || 'Test failed', percent: 0, etaMs: null };
+  } finally{
+    updateInlineStatusBar();
+  }
 }
 
 // Log management
@@ -1081,6 +1399,46 @@ function updateElement(id, value) {
   if (element) {
     element.textContent = value;
   }
+}
+
+// Setup Log/Linear toggle buttons for prediction histograms
+function setupHistogramScaleToggles(){
+  try {
+    // restore saved preference
+    const saved = localStorage.getItem('al_hist_log_scale');
+    if (saved === '1') trainingState.histLogScale = true;
+  } catch(_){ }
+  const mappings = [
+    { canvasId: 'pred-train-canvas', buttonId: 'pred-train-scale-toggle' },
+    { canvasId: 'pred-test-canvas', buttonId: 'pred-test-scale-toggle' },
+  ];
+  mappings.forEach(({canvasId, buttonId})=>{
+    const canvas = document.getElementById(canvasId);
+    if (!canvas) return;
+    let btn = document.getElementById(buttonId);
+    if (!btn){
+      btn = document.createElement('button');
+      btn.id = buttonId;
+      btn.type = 'button';
+      btn.className = 'btn btn-small';
+      btn.style.marginTop = '6px';
+      btn.style.display = 'inline-block';
+      btn.style.padding = '4px 8px';
+      btn.style.border = '1px solid var(--border-color, #374151)';
+      btn.style.background = 'var(--bg-elev, #1f2937)';
+      btn.style.color = 'var(--text, #e5e7eb)';
+      canvas.parentNode?.insertBefore(btn, canvas.nextSibling);
+    }
+    const setLabel = ()=>{ btn.textContent = trainingState.histLogScale ? 'Y scale: Log (click to Linear)' : 'Y scale: Linear (click to Log)'; };
+    setLabel();
+    btn.onclick = async ()=>{
+      trainingState.histLogScale = !trainingState.histLogScale;
+      try { localStorage.setItem('al_hist_log_scale', trainingState.histLogScale ? '1' : '0'); } catch(_){ }
+      setLabel();
+      await drawPredictionHistogram();
+      await drawTestHistogram();
+    };
+  });
 }
 
 function formatTime(milliseconds) {

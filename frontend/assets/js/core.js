@@ -20,16 +20,29 @@ const state = {
   keyMap: {},
   // Colors assigned per class index (aligned with state.classes order)
   classColors: [],
+  // ===== Single view buffer (decoupled from grid pagination) =====
+  single_items: [],          // appended items for single view only
+  single_groups: [],         // appended groups for single view only
+  single_next_page: 1,       // next page to fetch for single view
+  single_total_pages: null,  // total pages available for single view (from backend)
+  single_loading: false,     // to avoid concurrent fetches in single view
+  single_total_groups: null, // total groups available for single view (from backend)
+  single_remaining_groups: null, // remaining unlabeled groups counter for single view
   selectedItems: new Set(),
   // Click-cycling assignment map: itemId -> 0 (blue), 1 (red), 2 (yellow)
   assignmentMap: new Map(),
   stats: null,
   loading: false,
+  // Sequencing/cancellation for rapid reloads (e.g., fast sort toggles)
+  loadToken: 0,
+  loadAbortController: null,
   total_items: 0,
   total_pages: 1,
   theme: 'dark',
   search_query: '',
   label_filter: '',
+  // Suppress inline tile updates during atomic apply to avoid multi-step flashes
+  suppressInlineLabelUpdates: false,
   dragSelection: {
     active: false,
     startX: 0,
@@ -47,6 +60,8 @@ const state = {
     avgTimePerLabel: 0
   },
   tripletCheckDone: false,
+  // Sorting by predicted probability: 'asc' | 'desc' | '' (unsorted)
+  sort_pred: ''
 };
 
 function el(sel){ return document.querySelector(sel); }
@@ -228,6 +243,32 @@ function applyAssignmentClassToNode(node, idx){
   else if (idx === 2) node.classList.add('assign-yellow');
 
   const tag = node.querySelector && node.querySelector('.assign-tag');
+  const removeAssignedBadge = () => {
+    try {
+      const b = node.querySelector('.badge.assigned');
+      if (b && b.parentNode) b.parentNode.removeChild(b);
+    } catch(_){}
+  };
+  const metaRight = node.querySelector && (node.querySelector('.meta div:last-child') || node.querySelector('.meta div'));
+  const ensureAssignOverlayRight = (text, color) => {
+    try {
+      let ov = node.querySelector('.assign-overlay-right');
+      if (!ov){
+        ov = document.createElement('span');
+        ov.className = 'assign-overlay-right';
+        node.appendChild(ov);
+      }
+      ov.textContent = text || '';
+      ov.style.color = color || '';
+      ov.style.display = text ? 'inline-block' : 'none';
+    } catch(_){ }
+  };
+  const removeAssignOverlayRight = () => {
+    try {
+      const ov = node.querySelector('.assign-overlay-right');
+      if (ov) ov.parentNode.removeChild(ov);
+    } catch(_){ }
+  };
   // dynamic color styling
   if (idx == null || idx < 0){
     node.style.borderColor = '';
@@ -237,6 +278,9 @@ function applyAssignmentClassToNode(node, idx){
       tag.style.color = '';
       tag.style.display = 'none';
     }
+    // also remove any assigned badge/overlay when clearing assignment
+    removeAssignedBadge();
+    removeAssignOverlayRight();
     return;
   }
   const color = getClassColorByIndex(idx);
@@ -250,15 +294,50 @@ function applyAssignmentClassToNode(node, idx){
       const name = (state.classes && state.classes[idx] && state.classes[idx].name) ? state.classes[idx].name : '';
       tag.textContent = name;
       tag.style.color = color;
-      // Force visible even when CSS hides tags without legacy assign-* classes
+      // We'll hide this tag if we render a bottom-right badge to avoid duplicates
       tag.style.display = name ? 'inline-block' : 'none';
     }
+    // Render an in-tile bottom-right overlay with the class name only when there is no prediction/label
+    try {
+      const hasPred = !!node.querySelector('.badge.pred');
+      const hasLabel = !!node.querySelector('.badge.label');
+      const name = (state.classes && state.classes[idx] && state.classes[idx].name) ? state.classes[idx].name : '';
+      if (!hasPred && !hasLabel && name){
+        // ensure overlay and remove any meta badge variant
+        ensureAssignOverlayRight(name, color);
+        removeAssignedBadge();
+        // Hide the bottom-left tag to keep only one colored label visible
+        if (tag) tag.style.display = 'none';
+      } else {
+        // If predictions/labels exist, remove the overlay and allow the tag logic to show as usual
+        removeAssignOverlayRight();
+        removeAssignedBadge();
+        if (tag) {
+          // keep tag visible when appropriate
+          const name2 = (state.classes && state.classes[idx] && state.classes[idx].name) ? state.classes[idx].name : '';
+          tag.style.display = name2 ? 'inline-block' : 'none';
+        }
+      }
+    } catch(_){ }
   } else if (tag){
     const name = (state.classes && state.classes[idx] && state.classes[idx].name) ? state.classes[idx].name : '';
     tag.textContent = name;
     tag.style.color = '';
     // Force visible even when CSS hides tags without legacy assign-* classes
     tag.style.display = name ? 'inline-block' : 'none';
+    // Mirror logic without color: show overlay only if no prediction/label
+    try {
+      const hasPred = !!node.querySelector('.badge.pred');
+      const hasLabel = !!node.querySelector('.badge.label');
+      if (!hasPred && !hasLabel && name){
+        ensureAssignOverlayRight(name, '');
+        removeAssignedBadge();
+        if (tag) tag.style.display = 'none';
+      } else {
+        removeAssignOverlayRight();
+        removeAssignedBadge();
+      }
+    } catch(_){ }
   }
 }
 
@@ -346,6 +425,19 @@ function groupKeyFromPath(path){
 
 if (typeof window !== 'undefined'){
   window.groupKeyFromPath = groupKeyFromPath;
+}
+
+// Helpers to persist whether predictions are available
+function setPredictionsAvailableFlag(available){
+  try { localStorage.setItem('al_predictions_available', available ? '1' : '0'); } catch(_){ }
+}
+function getPredictionsAvailableFlag(){
+  try { return localStorage.getItem('al_predictions_available') === '1'; } catch(_){ return false; }
+}
+
+if (typeof window !== 'undefined'){
+  window.getPredictionsAvailableFlag = getPredictionsAvailableFlag;
+  window.setPredictionsAvailableFlag = setPredictionsAvailableFlag;
 }
 
 

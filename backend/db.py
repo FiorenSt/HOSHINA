@@ -1,6 +1,7 @@
 
 from sqlmodel import SQLModel, Field, create_engine, Session, select
 from sqlalchemy.pool import NullPool
+from sqlalchemy import event
 from typing import Optional, List, Dict
 from pathlib import Path
 import datetime as dt
@@ -15,9 +16,30 @@ engine = create_engine(
     poolclass=NullPool,
 )
 
+# Apply SQLite PRAGMAs on each new connection for faster bulk writes
+@event.listens_for(engine, "connect")
+def _set_sqlite_pragmas(dbapi_connection, connection_record):
+    try:
+        cursor = dbapi_connection.cursor()
+        # Use WAL for concurrent readers and better write throughput
+        cursor.execute("PRAGMA journal_mode=WAL")
+        # Relax fsync to balance durability/performance (safe for ingestion)
+        cursor.execute("PRAGMA synchronous=NORMAL")
+        # Keep temporary data in memory
+        cursor.execute("PRAGMA temp_store=MEMORY")
+        # Negative cache_size sets size in KB; this is ~200 MB page cache
+        cursor.execute("PRAGMA cache_size=-200000")
+        # Ensure FK constraints are enabled by default
+        cursor.execute("PRAGMA foreign_keys=ON")
+        cursor.close()
+    except Exception:
+        # Never fail connection establishment due to PRAGMA tuning
+        pass
+
 class DatasetItem(SQLModel, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
     path: str = Field(index=True, unique=True)
+    content_hash: Optional[str] = Field(default=None, index=True)
     width: Optional[int] = None
     height: Optional[int] = None
     meta_json: Optional[str] = None
@@ -64,6 +86,21 @@ class UMAPCoords(SQLModel, table=True):
 
 def init_db():
     SQLModel.metadata.create_all(engine)
+    # Lightweight, idempotent migrations for SQLite
+    try:
+        with engine.connect() as conn:
+            # Ensure content_hash column exists
+            rows = conn.exec_driver_sql("PRAGMA table_info(datasetitem)").fetchall()
+            cols = {str(r[1]).lower() for r in rows}
+            if "content_hash" not in cols:
+                conn.exec_driver_sql("ALTER TABLE datasetitem ADD COLUMN content_hash TEXT")
+            # Ensure index on content_hash exists (non-unique to avoid backfill conflicts)
+            conn.exec_driver_sql(
+                "CREATE INDEX IF NOT EXISTS idx_datasetitem_content_hash ON datasetitem (content_hash)"
+            )
+    except Exception:
+        # Do not block startup on migration issues; handled lazily elsewhere
+        pass
 
 def get_session():
     # Dependency that yields a session and ensures it is closed after the request

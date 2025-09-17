@@ -39,24 +39,17 @@
           <div style="display:flex; align-items:center; gap:8px; flex-wrap:wrap;">
             <button id="apply-data-dir" class="dropdown-btn">📁 Set Directory</button>
             <button id="ingest-data-dir" class="dropdown-btn primary">🔄 Ingest Data</button>
-            <label>Max groups
+            <label>Max triplets
               <input id="apply-max-groups" type="number" min="1" placeholder="e.g., 10000" style="width:110px;" />
             </label>
             <label class="checkbox-label">
               <input id="apply-require-all" type="checkbox" checked>
               <span class="checkmark"></span>
-              Require all roles
+              Require all roles (complete triplets only)
             </label>
-            <label class="checkbox-label">
-              <input id="apply-generate-pngs" type="checkbox" checked>
-              <span class="checkmark"></span>
-              Generate full-res PNGs (used for thumbnails & training)
-            </label>
+            
           </div>
           
-          <div style="margin-top:8px; border-top:1px solid var(--border-color); padding-top:8px;">
-            <button id="start-fresh" class="dropdown-btn danger">🧹 Start Fresh (wipe all data & caches)</button>
-          </div>
           <div style="margin-top:8px; border-top:1px solid var(--border-color); padding-top:8px;">
             <h4 style="margin:0 0 6px 0; font-size:13px; color:var(--text-secondary);">Triplet Recognition Config (auto-saves)</h4>
             <div style="display:grid; gap:6px;">
@@ -92,8 +85,8 @@
       <div class="nav-category-dropdown">
         <button class="category-toggle" data-category="training">🧠 Training ▼</button>
         <div class="category-dropdown" id="training-dropdown">
-          <button id="retrain" class="dropdown-btn retrain">🔄 Retrain Model</button>
           <button id="train-tf" class="dropdown-btn">🧠 TF Train</button>
+          <button id="bulk-assign-open" class="dropdown-btn">⚡ Bulk Assign by Threshold</button>
         </div>
       </div>
       
@@ -128,7 +121,11 @@
           </div>
           <button id="bulk-ops" class="dropdown-btn">⚡ Bulk Operations</button>
           <button id="map" class="dropdown-btn">🗺️ View Map</button>
+          <button id="recover-missing" class="dropdown-btn" title="Rebuild thumbnails for ingested, unlabeled items">🛠️ Rebuild Thumbnails</button>
           <button id="help" class="dropdown-btn" title="Show keyboard shortcuts">❓ Help</button>
+          <div style="margin-top:8px; border-top:1px solid var(--border-color); padding-top:8px;">
+            <button id="start-fresh" class="dropdown-btn danger">🧹 Start Fresh (wipe all data & caches)</button>
+          </div>
         </div>
       </div>
     </div>
@@ -142,6 +139,8 @@
       <input type="number" id="high" placeholder="0.8" step="0.01" value="0.8" min="0" max="1">
       <button id="pull" class="primary-btn">Apply</button>
     </div>
+
+    
     
     <!-- Status Row for Data and Thumbnail Operations -->
     <div class="header-status-row" id="header-status-row" style="display: none;">
@@ -176,6 +175,9 @@
           <button id="clear-assignments" class="batch-btn">Clear assignments</button>
         </div>
         <div class="assign-hint" id="assign-hint-top"></div>
+        <div class="assign-actions ralign">
+          <button id="sort-by-pred" class="batch-btn" title="Sort by predicted value">Sort: Predicted ↓</button>
+        </div>
       </div>
     </div>
   </header>
@@ -220,6 +222,15 @@
             <div class="status-indicator" id="train-status-indicator"></div>
           </div>
           <div class="device-info" id="train-device-info"></div>
+          <div class="train-inline-status" id="train-inline-status">
+            <div class="train-status-row">
+              <span id="train-status-msg">Idle</span>
+              <span id="train-status-extra" class="train-status-extra"></span>
+            </div>
+            <div class="progress-container small">
+              <div class="progress-bar" id="train-status-progress">0%</div>
+            </div>
+          </div>
           <button id="return-to-labeling" class="primary-btn" style="display:none; margin-left:12px;">⬅️ Return to Main (show predictions)</button>
         </div>
       </div>
@@ -287,6 +298,15 @@
             </div>
             
             <div class="config-group">
+              <label for="train-loss">Loss Function</label>
+              <select id="train-loss" class="config-select">
+                <option value="sparse_categorical_crossentropy">Sparse Categorical Crossentropy (default)</option>
+                <option value="categorical_crossentropy">Categorical Crossentropy (one-hot)</option>
+              </select>
+              <div class="config-hint">Choose loss; use categorical if you prefer one-hot labels</div>
+            </div>
+
+            <div class="config-group">
               <label class="checkbox-label">
                 <input id="train-augment" type="checkbox">
                 <span class="checkmark"></span>
@@ -343,6 +363,12 @@
             <label>Label Mapping</label>
             <div id="label-mapping-list" class="label-mapping-list"></div>
             <div class="config-hint">Enable labels to include in training and set their numeric targets.</div>
+          </div>
+
+          <div class="config-group" style="margin-top: 1rem;">
+            <label>Class Weights</label>
+            <div id="class-weight-list" class="label-mapping-list"></div>
+            <div class="config-hint">Optional weights per class to address imbalance (1.0 = default).</div>
           </div>
         </div>
 
@@ -436,6 +462,7 @@
             <div class="predict-summary">
               <div>Remaining to predict: <strong id="pred-remaining">-</strong></div>
               <div>Already predicted: <strong id="pred-done">-</strong> / <span id="pred-total">-</span></div>
+              <div id="pred-batch-status" style="margin-top:6px; color:#9ca3af; font-size:12px; display:none;">Batch 0/0</div>
               <div class="predict-actions">
                 <button id="run-predict" class="primary-btn">▶️ Predict</button>
                 <label style="margin-left:12px;">Batch size</label>
@@ -470,6 +497,7 @@
                 <span id="pred-threshold-value">0.50</span>
                 <button id="apply-threshold" class="action-btn" style="margin-left:12px;">✅ Apply Threshold</button>
               </div>
+              
             </div>
           </div>
         </div>
@@ -647,18 +675,13 @@
         <label>Class name
           <input id="ifl-class" type="text" placeholder="e.g., Real" />
         </label>
-        <label class="checkbox-label">
-          <input id="ifl-triplets" type="checkbox" checked>
-          <span class="checkmark"></span>
-          Create composite thumbnails (per grouping)
-        </label>
         
         <label class="checkbox-label">
           <input id="ifl-require-all" type="checkbox" checked>
           <span class="checkmark"></span>
-          Require all roles (complete groups only)
+          Require all roles (complete triplets only)
         </label>
-        <label>Max groups (optional)
+        <label>Max triplets (optional)
           <input id="ifl-max-groups" type="number" min="1" placeholder="e.g., 10000" />
         </label>
       </div>
@@ -712,6 +735,28 @@
     </div>
   </div>
 
+  <!-- Bulk Assign by Threshold Modal -->
+  <div id="bulkAssignModal" class="modal hidden">
+    <div class="modal-content">
+      <h2>⚡ Bulk Assign by Threshold</h2>
+      <div style="display:flex; align-items:center; gap:8px; flex-wrap:wrap;">
+        <label for="bulk-class-select">Class</label>
+        <select id="bulk-class-select" class="config-select" style="min-width:160px;"></select>
+        <label for="bulk-threshold" style="margin-left:8px;">Threshold</label>
+        <input id="bulk-threshold" type="number" min="0" max="1" step="0.01" value="0.50" style="width:90px;">
+        <label class="checkbox-label" style="margin-left:12px;">
+          <input id="bulk-unlabeled-only" type="checkbox" checked>
+          <span class="checkmark"></span>
+          Unlabeled only
+        </label>
+        <button id="bulk-assign-by-threshold" class="primary-btn" style="margin-left:12px;">Assign</button>
+      </div>
+      <div class="modal-actions">
+        <button id="bulkAssignClose">Close</button>
+      </div>
+    </div>
+  </div>
+
   <!-- Image Zoom Modal -->
   <div id="imageModal" class="modal hidden">
     <div class="modal-content large">
@@ -740,7 +785,7 @@
   <script src="assets/js/bulk.js?v=3"></script>
   <script src="assets/js/model_builder.js?v=3"></script>
   <script src="assets/js/training.js?v=3"></script>
-  <script src="assets/js/thumbs.js?v=3"></script>
+  <!-- thumbnails builder removed -->
   <script src="assets/js/init.js?v=4"></script>
 </body>
 </html>

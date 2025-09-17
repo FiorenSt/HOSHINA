@@ -66,7 +66,7 @@ def available_models() -> List[Dict[str, str]]:
     ]
 
 
-def _build_model(model_id: str, num_classes: int):
+def _build_model(model_id: str, num_classes: int, loss: str = "sparse_categorical_crossentropy"):
     import tensorflow as tf
     from tensorflow.keras import layers, models
 
@@ -103,7 +103,7 @@ def _build_model(model_id: str, num_classes: int):
     x = layers.Dropout(0.2)(x)
     outputs = layers.Dense(num_classes, activation="softmax")(x)
     model = models.Model(inputs=inputs, outputs=outputs)
-    model.compile(optimizer="adam", loss="sparse_categorical_crossentropy", metrics=["accuracy"])
+    model.compile(optimizer="adam", loss=loss, metrics=["accuracy"])
     return model, preprocess, input_size
 
 
@@ -171,7 +171,7 @@ def _ensure_dag(nodes: List[dict], edges: List[dict]) -> None:
             dfs(n)
 
 
-def build_model_from_graph(graph_spec: dict, num_classes: int):
+def build_model_from_graph(graph_spec: dict, num_classes: int, loss: str = "sparse_categorical_crossentropy"):
     """Build a tf.keras Model from a simple graph specification.
 
     graph_spec: {
@@ -297,7 +297,7 @@ def build_model_from_graph(graph_spec: dict, num_classes: int):
     # Append classifier head
     outputs = layers.Dense(num_classes, activation="softmax")(last_tensor)
     model = models.Model(inputs=keras_input, outputs=outputs)
-    model.compile(optimizer="adam", loss="sparse_categorical_crossentropy", metrics=["accuracy"])
+    model.compile(optimizer="adam", loss=loss, metrics=["accuracy"])
     return model
 
 
@@ -326,10 +326,7 @@ def _compose_triplet_array(p: Path, input_size: Tuple[int, int]) -> np.ndarray:
 
     def load_gray(path: Path) -> np.ndarray:
         try:
-            # Use PNG cache for faster loading and consistent processing
-            from .utils import get_or_make_full_png
-            png_path = get_or_make_full_png(path)
-            img = Image.open(png_path).convert("L").resize(input_size)
+            img = safe_open_image(path).convert("L").resize(input_size)
             arr = np.asarray(img, dtype=np.float32)
             return arr
         except Exception:
@@ -342,56 +339,113 @@ def _compose_triplet_array(p: Path, input_size: Tuple[int, int]) -> np.ndarray:
     return rgb
 
 
-def _make_dataset(paths: List[Path], labels: List[int], input_size: Tuple[int, int], preprocess: Callable, augment: bool, batch_size: int, input_mode: str, single_role: Optional[str] = None):
+def _make_dataset(
+    paths: List[Path],
+    labels: List[int],
+    input_size: Tuple[int, int],
+    preprocess: Callable,
+    augment: bool,
+    batch_size: int,
+    input_mode: str,
+    single_role: Optional[str] = None,
+    one_hot: bool = False,
+    num_classes: Optional[int] = None,
+    sample_weight_map: Optional[Dict[int, float]] = None,
+):
     import tensorflow as tf
 
-    def gen():
-        for p, y in zip(paths, labels):
-            try:
-                if input_mode == "triplet":
-                    arr = _compose_triplet_array(p, input_size)
-                else:
-                    # single-image mode: allow choosing one of target/ref/diff from triplet; replicate to 3 channels
-                    role = (single_role or "").lower()
-                    name_lower = p.name.lower()
-                    base = p.stem
-                    for suf in ["_target.fits", "_ref.fits", "_diff.fits"]:
-                        if name_lower.endswith(suf):
-                            base = p.name[: -len(suf)]
-                            break
-                    if role in {"target", "ref", "diff"}:
-                        # load as grayscale and replicate to RGB
-                        rp = p.with_name(f"{base}_{role}.fits")
-                        try:
-                            img = safe_open_image(rp if rp.exists() else p).convert("L").resize(input_size)
-                            g = np.asarray(img, dtype=np.float32)
-                        except Exception:
-                            g = np.zeros(input_size, dtype=np.float32)
-                        arr = np.stack([g, g, g], axis=-1)
-                    else:
-                        img = safe_open_image(p).convert("RGB").resize(input_size)
-                        arr = np.asarray(img, dtype=np.float32)
-                arr = preprocess(arr)
-                yield arr, np.array(y, dtype=np.int64)
-            except Exception:
-                continue
+    # Convert to tensors once for efficient pipeline construction
+    path_strs = [str(p) for p in paths]
+    ds = tf.data.Dataset.from_tensor_slices((path_strs, np.array(labels, dtype=np.int64)))
 
-    ds = tf.data.Dataset.from_generator(
-        gen,
-        output_signature=(
-            tf.TensorSpec(shape=(input_size[0], input_size[1], 3), dtype=tf.float32),
-            tf.TensorSpec(shape=(), dtype=tf.int64),
-        ),
-    )
+    # Options: allow non-deterministic for throughput and enable optimizations
+    opts = tf.data.Options()
+    try:
+        opts.experimental_deterministic = False  # best-effort ordering
+        opts.experimental_optimization.apply_default_optimizations = True
+        opts.experimental_optimization.autotune_buffers = True
+        opts.experimental_optimization.autotune_map_parallelism = True
+        opts.experimental_optimization.map_parallelization = True
+        opts.experimental_optimization.parallel_batch = True
+        opts.experimental_optimization.shutdown_quietly = True
+    except Exception:
+        pass
+    ds = ds.with_options(opts)
+
+    target_h, target_w = int(input_size[0]), int(input_size[1])
+
+    def _load_array_py(p_bytes: bytes) -> np.ndarray:
+        # Python side loader used via tf.py_function
+        try:
+            p = Path(p_bytes.decode("utf-8"))
+        except Exception:
+            return np.zeros((target_h, target_w, 3), dtype=np.float32)
+
+        try:
+            if input_mode == "triplet":
+                arr = _compose_triplet_array(p, (target_h, target_w)).astype(np.float32)
+            else:
+                role = (single_role or "").lower()
+                name_lower = p.name.lower()
+                base = p.stem
+                for suf in ["_target.fits", "_ref.fits", "_diff.fits"]:
+                    if name_lower.endswith(suf):
+                        base = p.name[: -len(suf)]
+                        break
+                if role in {"target", "ref", "diff"}:
+                    rp = p.with_name(f"{base}_{role}.fits")
+                    try:
+                        img = safe_open_image(rp if rp.exists() else p).convert("L").resize((target_h, target_w))
+                        g = np.asarray(img, dtype=np.float32)
+                    except Exception:
+                        g = np.zeros((target_h, target_w), dtype=np.float32)
+                    arr = np.stack([g, g, g], axis=-1)
+                else:
+                    img = safe_open_image(p).convert("RGB").resize((target_h, target_w))
+                    arr = np.asarray(img, dtype=np.float32)
+        except Exception:
+            arr = np.zeros((target_h, target_w, 3), dtype=np.float32)
+        # Ensure correct shape/dtype
+        if arr.ndim != 3 or arr.shape[-1] != 3:
+            arr = np.zeros((target_h, target_w, 3), dtype=np.float32)
+        return arr
+
+    def _map_fn(p_str, y):
+        x = tf.py_function(_load_array_py, [p_str], Tout=tf.float32)
+        x.set_shape((target_h, target_w, 3))
+        # Apply model-specific preprocessing as a TensorFlow op
+        x = preprocess(x)
+        if one_hot:
+            depth = int(num_classes or 0)
+            y_oh = tf.one_hot(tf.cast(y, tf.int32), depth=depth, dtype=tf.float32)
+            if sample_weight_map is not None and depth > 0:
+                weights = tf.constant([sample_weight_map.get(i, 1.0) for i in range(depth)], dtype=tf.float32)
+                sw = tf.gather(weights, tf.cast(y, tf.int32))
+                return x, y_oh, sw
+            return x, y_oh
+        return x, tf.cast(y, tf.int64)
+
+    ds = ds.map(_map_fn, num_parallel_calls=tf.data.AUTOTUNE)
+
     if augment:
-        aug = tf.keras.Sequential([
-            tf.keras.layers.RandomFlip("horizontal"),
-            tf.keras.layers.RandomRotation(0.05),
-            tf.keras.layers.RandomZoom(0.1),
-        ])
-        ds = ds.map(lambda x, y: (aug(x, training=True), y), num_parallel_calls=tf.data.AUTOTUNE)
+        # Only allow rotations (0/90/180/270) and mirroring (horizontal/vertical).
+        # Since triplets are composed into a single 3-channel tensor, these ops
+        # apply the exact same transform to all images in the triplet.
+        def _rot_mirror(x, y, *rest):
+            k = tf.random.uniform([], minval=0, maxval=4, dtype=tf.int32)
+            x = tf.image.rot90(x, k)
+            do_h = tf.random.uniform([]) < 0.5
+            x = tf.cond(do_h, lambda: tf.image.flip_left_right(x), lambda: x)
+            do_v = tf.random.uniform([]) < 0.5
+            x = tf.cond(do_v, lambda: tf.image.flip_up_down(x), lambda: x)
+            if len(rest) == 1:
+                return x, y, rest[0]
+            return x, y
+        ds = ds.map(_rot_mirror, num_parallel_calls=tf.data.AUTOTUNE)
+
     ds = ds.shuffle(buffer_size=min(2048, max(32, len(paths))))
-    ds = ds.batch(batch_size).prefetch(tf.data.AUTOTUNE)
+    ds = ds.batch(batch_size, drop_remainder=False)
+    ds = ds.prefetch(tf.data.AUTOTUNE)
     return ds
 
 
@@ -405,6 +459,8 @@ def start_training(
     split_pct: int = 85,
     split_strategy: str = "natural",
     single_role: str = "target",
+    loss: str = "sparse_categorical_crossentropy",
+    class_weight: Optional[Dict[str, float]] = None,
 ):
     global _worker, _cancel_flag
 
@@ -423,11 +479,13 @@ def start_training(
         except Exception:
             gpu_name = None
 
-        params = {"batch_size": str(batch_size), "augment": str(augment), "input_mode": input_mode, "split_pct": str(split_pct), "split_strategy": split_strategy}
+        params = {"batch_size": str(batch_size), "augment": str(augment), "input_mode": input_mode, "split_pct": str(split_pct), "split_strategy": split_strategy, "loss": loss}
         if input_mode == "single":
             params["single_role"] = single_role
         if class_map:
             params["class_map"] = str(class_map)
+        if class_weight:
+            params["class_weight"] = str(class_weight)
         _set_status(running=True, stage="preparing", epoch=0, total_epochs=epochs, model_name=model_id, params=params, device=tf.test.gpu_device_name() or "CPU", gpu=gpu_name)
         try:
             # Fetch classes and labeled items
@@ -533,10 +591,50 @@ def start_training(
             remap = {t: i for i, t in enumerate(unique_targets)}
             inv_remap = {i: t for t, i in remap.items()}
             labels = [remap[t] for t in labels]
-            model, preprocess, input_size = _build_model(model_id, num_classes=len(unique_targets))
+            # Build model with chosen loss
+            model, preprocess, input_size = _build_model(model_id, num_classes=len(unique_targets), loss=loss)
 
-            ds_tr = _make_dataset([paths[i] for i in tr_idx], [labels[i] for i in tr_idx], input_size, preprocess, augment, batch_size, input_mode, single_role=single_role)
-            ds_va = _make_dataset([paths[i] for i in va_idx], [labels[i] for i in va_idx], input_size, preprocess, False, batch_size, input_mode, single_role=single_role)
+            # Prepare class weighting map keyed by contiguous indices if provided
+            cw_map_idx: Optional[Dict[int, float]] = None
+            if class_weight:
+                try:
+                    # Convert provided map (target index as string) to contiguous index
+                    cw_map_idx = {}
+                    for k, v in class_weight.items():
+                        original_idx = int(k)
+                        if original_idx in remap:
+                            cw_map_idx[remap[original_idx]] = float(v)
+                except Exception:
+                    cw_map_idx = None
+
+            # If categorical loss is selected, emit one-hot and optionally sample weights
+            use_one_hot = loss in {"categorical_crossentropy", "categorical_focal_crossentropy"}
+            ds_tr = _make_dataset(
+                [paths[i] for i in tr_idx],
+                [labels[i] for i in tr_idx],
+                input_size,
+                preprocess,
+                augment,
+                batch_size,
+                input_mode,
+                single_role=single_role,
+                one_hot=use_one_hot,
+                num_classes=len(unique_targets),
+                sample_weight_map=cw_map_idx if use_one_hot else None,
+            )
+            ds_va = _make_dataset(
+                [paths[i] for i in va_idx],
+                [labels[i] for i in va_idx],
+                input_size,
+                preprocess,
+                False,
+                batch_size,
+                input_mode,
+                single_role=single_role,
+                one_hot=use_one_hot,
+                num_classes=len(unique_targets),
+                sample_weight_map=None,
+            )
 
             class EpochProgress(tf.keras.callbacks.Callback):
                 def on_epoch_end(self, epoch, logs=None):
@@ -558,7 +656,17 @@ def start_training(
                         self.model.stop_training = True
 
             _set_status(stage="training", epoch=0)
-            model.fit(ds_tr, validation_data=ds_va, epochs=epochs, callbacks=[EpochProgress()], verbose=0)
+            fit_kwargs = {}
+            # For sparse losses, we can pass class_weight directly
+            if not use_one_hot and class_weight:
+                # Remap class_weight keys to contiguous indices
+                try:
+                    cw_fit = {int(remap[int(k)]): float(v) for k, v in class_weight.items() if int(k) in remap}
+                    if cw_fit:
+                        fit_kwargs["class_weight"] = cw_fit
+                except Exception:
+                    pass
+            model.fit(ds_tr, validation_data=ds_va, epochs=epochs, callbacks=[EpochProgress()], verbose=0, **fit_kwargs)
 
             if _cancel_flag:
                 _set_status(stage="cancelled", running=False, message="Training cancelled")
@@ -569,155 +677,8 @@ def start_training(
             model_dir.mkdir(parents=True, exist_ok=True)
             model_path = model_dir / "model.keras"
             model.save(model_path)
-
-            # Predict all items
-            _set_status(stage="predicting")
-            with Session(engine) as session:
-                import json as _json
-                all_items = session.exec(select(DatasetItem)).all()
-                if input_mode == "triplet":
-                    # Group by base and write same prediction to group members
-                    # Build map base_key -> [items]
-                    from collections import defaultdict
-                    groups = defaultdict(list)
-                    for r in all_items:
-                        p = Path(r.path)
-                        name_lower = p.name.lower()
-                        base = None
-                        for suf in ["_target.fits", "_ref.fits", "_diff.fits"]:
-                            if name_lower.endswith(suf):
-                                base = p.name[: -len(suf)]
-                                break
-                        if base is None:
-                            continue
-                        groups[(p.parent, base)].append(r)
-
-                    for (parent, base), members in groups.items():
-                        # Construct composite from whichever exists (prefer target path if available)
-                        candidate = None
-                        for role in ["_target.fits", "_ref.fits", "_diff.fits"]:
-                            pp = parent / f"{base}{role}"
-                            if pp.exists():
-                                candidate = pp
-                                break
-                        if candidate is None:
-                            continue
-                        try:
-                            arr = _compose_triplet_array(candidate, input_size)
-                            x = preprocess(arr)
-                            x = np.expand_dims(x, axis=0)
-                            pr = model.predict(x, verbose=0)[0]
-                            # Map back to original target indices if custom mapping provided
-                            prob_map = {name: float(pr[remap[class_to_idx[name]]]) for name in class_to_idx.keys()}
-                            pv = np.array(list(prob_map.values()))
-                            if len(pv) > 0:
-                                order = np.argsort(-pv)
-                                pred_lbl = list(class_to_idx.keys())[int(order[0])]
-                                margin = float(pv[order[0]] - pv[order[1]]) if len(pv) > 1 else float(1.0 - pv[0])
-                                maxp = float(pv[order[0]])
-                            else:
-                                pred_lbl, margin, maxp = None, None, None
-                            for mem in members:
-                                existing = session.get(Prediction, mem.id)
-                                if existing:
-                                    existing.proba_json = _json.dumps(prob_map)
-                                    existing.pred_label = pred_lbl
-                                    existing.margin = margin
-                                    existing.max_proba = maxp
-                                    session.add(existing)
-                                else:
-                                    session.add(Prediction(item_id=mem.id, proba_json=_json.dumps(prob_map), pred_label=pred_lbl, margin=margin, max_proba=maxp))
-                            session.commit()
-                        except Exception:
-                            continue
-                elif input_mode == "single" and (single_role or "").lower() in {"target", "ref", "diff"}:
-                    # Single mode with role: group by base and use the chosen role file
-                    from collections import defaultdict
-                    role = (single_role or "").lower()
-                    groups = defaultdict(list)
-                    for r in all_items:
-                        p = Path(r.path)
-                        name_lower = p.name.lower()
-                        base = None
-                        for suf in ["_target.fits", "_ref.fits", "_diff.fits"]:
-                            if name_lower.endswith(suf):
-                                base = p.name[: -len(suf)]
-                                break
-                        if base is None:
-                            continue
-                        groups[(p.parent, base)].append(r)
-
-                    for (parent, base), members in groups.items():
-                        try:
-                            rp = parent / f"{base}_{role}.fits"
-                            candidate = rp if rp.exists() else (parent / f"{base}_target.fits")
-                            if not candidate.exists():
-                                continue
-                            # load grayscale and replicate to 3 channels
-                            try:
-                                img = safe_open_image(candidate).convert("L").resize(input_size)
-                                g = np.asarray(img, dtype=np.float32)
-                            except Exception:
-                                g = np.zeros(input_size, dtype=np.float32)
-                            arr = np.stack([g, g, g], axis=-1)
-                            x = preprocess(arr)
-                            x = np.expand_dims(x, axis=0)
-                            pr = model.predict(x, verbose=0)[0]
-                            prob_map = {name: float(pr[remap[class_to_idx[name]]]) for name in class_to_idx.keys()}
-                            pv = np.array(list(prob_map.values()))
-                            if len(pv) > 0:
-                                order = np.argsort(-pv)
-                                pred_lbl = list(class_to_idx.keys())[int(order[0])]
-                                margin = float(pv[order[0]] - pv[order[1]]) if len(pv) > 1 else float(1.0 - pv[0])
-                                maxp = float(pv[order[0]])
-                            else:
-                                pred_lbl, margin, maxp = None, None, None
-                            for mem in members:
-                                existing = session.get(Prediction, mem.id)
-                                if existing:
-                                    existing.proba_json = _json.dumps(prob_map)
-                                    existing.pred_label = pred_lbl
-                                    existing.margin = margin
-                                    existing.max_proba = maxp
-                                    session.add(existing)
-                                else:
-                                    session.add(Prediction(item_id=mem.id, proba_json=_json.dumps(prob_map), pred_label=pred_lbl, margin=margin, max_proba=maxp))
-                            session.commit()
-                        except Exception:
-                            continue
-                else:
-                    for r in all_items:
-                        try:
-                            img = safe_open_image(Path(r.path)).convert("RGB").resize(input_size)
-                            arr = np.asarray(img, dtype=np.float32)
-                            x = preprocess(arr)
-                            x = np.expand_dims(x, axis=0)
-                            pr = model.predict(x, verbose=0)[0]
-                            # upsert prediction
-                            prob_map = {name: float(pr[remap[class_to_idx[name]]]) for name in class_to_idx.keys()}
-                            pv = np.array(list(prob_map.values()))
-                            if len(pv) > 0:
-                                order = np.argsort(-pv)
-                                pred_lbl = list(class_to_idx.keys())[int(order[0])]
-                                margin = float(pv[order[0]] - pv[order[1]]) if len(pv) > 1 else float(1.0 - pv[0])
-                                maxp = float(pv[order[0]])
-                            else:
-                                pred_lbl, margin, maxp = None, None, None
-
-                            existing = session.get(Prediction, r.id)
-                            if existing:
-                                existing.proba_json = _json.dumps(prob_map)
-                                existing.pred_label = pred_lbl
-                                existing.margin = margin
-                                existing.max_proba = maxp
-                                session.add(existing)
-                            else:
-                                session.add(Prediction(item_id=r.id, proba_json=_json.dumps(prob_map), pred_label=pred_lbl, margin=margin, max_proba=maxp))
-                            session.commit()
-                        except Exception:
-                            continue
-
-            _set_status(stage="done", running=False, message="Training completed")
+            # Stop here: do not auto-run predictions after training. Leave model ready for prediction.
+            _set_status(stage="done", running=False, message="Model trained. Ready for prediction")
         except Exception as e:
             _set_status(stage="error", running=False, message=str(e))
 
@@ -733,7 +694,11 @@ def list_options() -> Dict[str, object]:
     return {
         "models": models,
         "input_modes": ["single", "triplet"],
-        "defaults": {"model": "mobilenet_v2", "epochs": 3, "batch_size": 32, "augment": False, "input_mode": "single", "single_role": "target"},
+        "losses": [
+            {"id": "sparse_categorical_crossentropy", "name": "Sparse Categorical Crossentropy"},
+            {"id": "categorical_crossentropy", "name": "Categorical Crossentropy"}
+        ],
+        "defaults": {"model": "mobilenet_v2", "epochs": 3, "batch_size": 32, "augment": False, "input_mode": "single", "single_role": "target", "loss": "sparse_categorical_crossentropy"},
         "custom_available": bool(custom_present),
         "notes": "Images from FITS are ZScaled already; standard ImageNet preprocessing is applied per model. Triplet mode maps target/ref/diff to R/G/B channels.",
     }

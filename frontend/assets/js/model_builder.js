@@ -7,6 +7,169 @@
     selectedNodeId: null,
   };
 
+  // Preset graphs (fully working architectures)
+  const PRESETS = {
+    'Simple CNN': {
+      input_shape: [224,224,3],
+      nodes: [
+        { id: 'input', type: 'Input', params: {}, ui: { x: 40, y: 120, w: 140, h: 56, d: 12 } },
+        { id: 'conv1', type: 'Conv2D', params: { filters: 32, kernel_size: 3, strides: 1, padding: 'same', activation: 'relu' }, ui: { x: 220, y: 120, w: 170, h: 56, d: 12 } },
+        { id: 'pool1', type: 'MaxPool2D', params: { pool_size: 2, strides: 2, padding: 'same' }, ui: { x: 410, y: 120, w: 150, h: 56, d: 12 } },
+        { id: 'conv2', type: 'Conv2D', params: { filters: 64, kernel_size: 3, strides: 1, padding: 'same', activation: 'relu' }, ui: { x: 580, y: 120, w: 170, h: 56, d: 12 } },
+        { id: 'pool2', type: 'MaxPool2D', params: { pool_size: 2, strides: 2, padding: 'same' }, ui: { x: 770, y: 120, w: 150, h: 56, d: 12 } },
+        { id: 'gap', type: 'GlobalAveragePooling2D', params: {}, ui: { x: 940, y: 120, w: 150, h: 56, d: 12 } },
+      ],
+      edges: [
+        { from: 'input', to: 'conv1' },
+        { from: 'conv1', to: 'pool1' },
+        { from: 'pool1', to: 'conv2' },
+        { from: 'conv2', to: 'pool2' },
+        { from: 'pool2', to: 'gap' },
+      ]
+    },
+    'Tiny SepConv': {
+      input_shape: [224,224,3],
+      nodes: [
+        { id: 'input', type: 'Input', params: {}, ui: { x: 40, y: 120, w: 140, h: 56, d: 12 } },
+        { id: 'sc1', type: 'SeparableConv2D', params: { filters: 32, kernel_size: 3, strides: 1, padding: 'same', activation: 'relu' }, ui: { x: 220, y: 120, w: 190, h: 56, d: 12 } },
+        { id: 'pool1', type: 'MaxPool2D', params: { pool_size: 2, strides: 2, padding: 'same' }, ui: { x: 430, y: 120, w: 150, h: 56, d: 12 } },
+        { id: 'sc2', type: 'SeparableConv2D', params: { filters: 64, kernel_size: 3, strides: 1, padding: 'same', activation: 'relu' }, ui: { x: 600, y: 120, w: 190, h: 56, d: 12 } },
+        { id: 'gap', type: 'GlobalAveragePooling2D', params: {}, ui: { x: 810, y: 120, w: 150, h: 56, d: 12 } },
+      ],
+      edges: [
+        { from: 'input', to: 'sc1' },
+        { from: 'sc1', to: 'pool1' },
+        { from: 'pool1', to: 'sc2' },
+        { from: 'sc2', to: 'gap' },
+      ]
+    },
+    'Mini ResNet': {
+      input_shape: [224,224,3],
+      nodes: [
+        { id: 'input', type: 'Input', params: {}, ui: { x: 40, y: 120, w: 140, h: 56, d: 12 } },
+        { id: 'conv1', type: 'Conv2D', params: { filters: 16, kernel_size: 3, strides: 1, padding: 'same', activation: 'relu' }, ui: { x: 220, y: 120, w: 170, h: 56, d: 12 } },
+        { id: 'bn1', type: 'BatchNormalization', params: {}, ui: { x: 410, y: 120, w: 150, h: 56, d: 12 } },
+        { id: 'act1', type: 'Activation', params: { activation: 'relu' }, ui: { x: 580, y: 120, w: 150, h: 56, d: 12 } },
+        { id: 'conv2', type: 'Conv2D', params: { filters: 16, kernel_size: 3, strides: 1, padding: 'same', activation: 'linear' }, ui: { x: 740, y: 120, w: 170, h: 56, d: 12 } },
+        { id: 'bn2', type: 'BatchNormalization', params: {}, ui: { x: 930, y: 120, w: 150, h: 56, d: 12 } },
+        { id: 'proj', type: 'Conv2D', params: { filters: 16, kernel_size: 1, strides: 1, padding: 'same', activation: 'linear' }, ui: { x: 580, y: 260, w: 150, h: 56, d: 12 } },
+        { id: 'add', type: 'Add', params: {}, ui: { x: 1100, y: 140, w: 130, h: 56, d: 12 } },
+        { id: 'act2', type: 'Activation', params: { activation: 'relu' }, ui: { x: 1250, y: 140, w: 150, h: 56, d: 12 } },
+        { id: 'gap', type: 'GlobalAveragePooling2D', params: {}, ui: { x: 1410, y: 140, w: 150, h: 56, d: 12 } },
+      ],
+      edges: [
+        { from: 'input', to: 'conv1' },
+        { from: 'conv1', to: 'bn1' },
+        { from: 'bn1', to: 'act1' },
+        { from: 'act1', to: 'conv2' },
+        { from: 'conv2', to: 'bn2' },
+        // skip path
+        { from: 'input', to: 'proj' },
+        // merge
+        { from: 'bn2', to: 'add' },
+        { from: 'proj', to: 'add' },
+        { from: 'add', to: 'act2' },
+        { from: 'act2', to: 'gap' },
+      ]
+    },
+    'GAP Head': {
+      input_shape: [224,224,3],
+      nodes: [
+        { id: 'input', type: 'Input', params: {}, ui: { x: 40, y: 120, w: 140, h: 56, d: 12 } },
+        { id: 'conv', type: 'Conv2D', params: { filters: 32, kernel_size: 3, strides: 1, padding: 'same', activation: 'relu' }, ui: { x: 220, y: 120, w: 170, h: 56, d: 12 } },
+        { id: 'gap', type: 'GlobalAveragePooling2D', params: {}, ui: { x: 410, y: 120, w: 150, h: 56, d: 12 } },
+      ],
+      edges: [
+        { from: 'input', to: 'conv' },
+        { from: 'conv', to: 'gap' },
+      ]
+    },
+    'Tiny MLP': {
+      input_shape: [224,224,3],
+      nodes: [
+        { id: 'input', type: 'Input', params: {}, ui: { x: 40, y: 120, w: 140, h: 56, d: 12 } },
+        { id: 'flatten', type: 'Flatten', params: {}, ui: { x: 220, y: 120, w: 150, h: 56, d: 12 } },
+        { id: 'dense1', type: 'Dense', params: { units: 256, activation: 'relu' }, ui: { x: 390, y: 120, w: 150, h: 56, d: 12 } },
+        { id: 'drop', type: 'Dropout', params: { rate: 0.3 }, ui: { x: 550, y: 120, w: 130, h: 56, d: 12 } },
+        { id: 'dense2', type: 'Dense', params: { units: 128, activation: 'relu' }, ui: { x: 690, y: 120, w: 150, h: 56, d: 12 } },
+      ],
+      edges: [
+        { from: 'input', to: 'flatten' },
+        { from: 'flatten', to: 'dense1' },
+        { from: 'dense1', to: 'drop' },
+        { from: 'drop', to: 'dense2' },
+      ]
+    },
+    'VGG Small': {
+      input_shape: [224,224,3],
+      nodes: [
+        { id: 'input', type: 'Input', params: {}, ui: { x: 40, y: 120, w: 140, h: 56, d: 12 } },
+        { id: 'c11', type: 'Conv2D', params: { filters: 32, kernel_size: 3, padding: 'same', activation: 'relu' }, ui: { x: 220, y: 80, w: 170, h: 56, d: 12 } },
+        { id: 'c12', type: 'Conv2D', params: { filters: 32, kernel_size: 3, padding: 'same', activation: 'relu' }, ui: { x: 400, y: 80, w: 170, h: 56, d: 12 } },
+        { id: 'p1', type: 'MaxPool2D', params: { pool_size: 2, strides: 2, padding: 'same' }, ui: { x: 580, y: 80, w: 150, h: 56, d: 12 } },
+        { id: 'c21', type: 'Conv2D', params: { filters: 64, kernel_size: 3, padding: 'same', activation: 'relu' }, ui: { x: 760, y: 80, w: 170, h: 56, d: 12 } },
+        { id: 'c22', type: 'Conv2D', params: { filters: 64, kernel_size: 3, padding: 'same', activation: 'relu' }, ui: { x: 940, y: 80, w: 170, h: 56, d: 12 } },
+        { id: 'p2', type: 'MaxPool2D', params: { pool_size: 2, strides: 2, padding: 'same' }, ui: { x: 1120, y: 80, w: 150, h: 56, d: 12 } },
+        { id: 'gap', type: 'GlobalAveragePooling2D', params: {}, ui: { x: 1300, y: 80, w: 150, h: 56, d: 12 } },
+      ],
+      edges: [
+        { from: 'input', to: 'c11' },
+        { from: 'c11', to: 'c12' },
+        { from: 'c12', to: 'p1' },
+        { from: 'p1', to: 'c21' },
+        { from: 'c21', to: 'c22' },
+        { from: 'c22', to: 'p2' },
+        { from: 'p2', to: 'gap' },
+      ]
+    },
+    'Inception Mini': {
+      input_shape: [224,224,3],
+      nodes: [
+        { id: 'input', type: 'Input', params: {}, ui: { x: 40, y: 160, w: 140, h: 56, d: 12 } },
+        { id: 'stem', type: 'Conv2D', params: { filters: 32, kernel_size: 3, strides: 1, padding: 'same', activation: 'relu' }, ui: { x: 220, y: 160, w: 170, h: 56, d: 12 } },
+        { id: 'b1_1x1', type: 'Conv2D', params: { filters: 16, kernel_size: 1, padding: 'same', activation: 'relu' }, ui: { x: 420, y: 40, w: 150, h: 56, d: 12 } },
+        { id: 'b2_3x3', type: 'Conv2D', params: { filters: 24, kernel_size: 3, padding: 'same', activation: 'relu' }, ui: { x: 420, y: 140, w: 170, h: 56, d: 12 } },
+        { id: 'b3_5x5', type: 'Conv2D', params: { filters: 16, kernel_size: 5, padding: 'same', activation: 'relu' }, ui: { x: 420, y: 240, w: 170, h: 56, d: 12 } },
+        { id: 'b4_pool', type: 'MaxPool2D', params: { pool_size: 3, strides: 1, padding: 'same' }, ui: { x: 420, y: 340, w: 150, h: 56, d: 12 } },
+        { id: 'b4_1x1', type: 'Conv2D', params: { filters: 16, kernel_size: 1, padding: 'same', activation: 'relu' }, ui: { x: 600, y: 340, w: 150, h: 56, d: 12 } },
+        { id: 'concat', type: 'Concat', params: { axis: -1 }, ui: { x: 820, y: 160, w: 150, h: 56, d: 12 } },
+        { id: 'gap', type: 'GlobalAveragePooling2D', params: {}, ui: { x: 1000, y: 160, w: 150, h: 56, d: 12 } },
+      ],
+      edges: [
+        { from: 'input', to: 'stem' },
+        { from: 'stem', to: 'b1_1x1' },
+        { from: 'stem', to: 'b2_3x3' },
+        { from: 'stem', to: 'b3_5x5' },
+        { from: 'stem', to: 'b4_pool' },
+        { from: 'b4_pool', to: 'b4_1x1' },
+        { from: 'b1_1x1', to: 'concat' },
+        { from: 'b2_3x3', to: 'concat' },
+        { from: 'b3_5x5', to: 'concat' },
+        { from: 'b4_1x1', to: 'concat' },
+        { from: 'concat', to: 'gap' },
+      ]
+    },
+    'Two-Branch Concat': {
+      input_shape: [224,224,3],
+      nodes: [
+        { id: 'input', type: 'Input', params: {}, ui: { x: 40, y: 140, w: 140, h: 56, d: 12 } },
+        { id: 'path1_conv', type: 'Conv2D', params: { filters: 32, kernel_size: 3, padding: 'same', activation: 'relu' }, ui: { x: 220, y: 80, w: 170, h: 56, d: 12 } },
+        { id: 'path1_pool', type: 'MaxPool2D', params: { pool_size: 2, strides: 2, padding: 'same' }, ui: { x: 410, y: 80, w: 150, h: 56, d: 12 } },
+        { id: 'path2_conv', type: 'Conv2D', params: { filters: 16, kernel_size: 1, padding: 'same', activation: 'relu' }, ui: { x: 220, y: 200, w: 150, h: 56, d: 12 } },
+        { id: 'concat', type: 'Concat', params: { axis: -1 }, ui: { x: 600, y: 140, w: 150, h: 56, d: 12 } },
+        { id: 'gap', type: 'GlobalAveragePooling2D', params: {}, ui: { x: 780, y: 140, w: 150, h: 56, d: 12 } },
+      ],
+      edges: [
+        { from: 'input', to: 'path1_conv' },
+        { from: 'path1_conv', to: 'path1_pool' },
+        { from: 'input', to: 'path2_conv' },
+        { from: 'path1_pool', to: 'concat' },
+        { from: 'path2_conv', to: 'concat' },
+        { from: 'concat', to: 'gap' },
+      ]
+    },
+  };
+
   function ensureModal(){
     if (document.getElementById('modelBuilderModal')) return;
     const m = document.createElement('div');
@@ -16,7 +179,20 @@
       <div class="modal-content fullscreen">
         <div style="display:flex; align-items:center; justify-content:space-between; padding:10px 14px; border-bottom:1px solid #1f2937; background: var(--card);">
           <h2 style="margin:0;">🧩 Model Builder</h2>
-          <div style="display:flex; gap:8px;">
+          <div style="display:flex; gap:8px; align-items:center;">
+            <label for="mb-preset" style="font-size:13px; color:#9ca3af;">Preset</label>
+            <select id="mb-preset" class="config-select" style="min-width:220px;">
+              <option value="">Choose preset…</option>
+              <option value="Simple CNN">Simple CNN</option>
+              <option value="Tiny SepConv">Tiny SepConv</option>
+              <option value="Mini ResNet">Mini ResNet</option>
+              <option value="GAP Head">GAP Head</option>
+              <option value="Tiny MLP">Tiny MLP</option>
+              <option value="VGG Small">VGG Small</option>
+              <option value="Inception Mini">Inception Mini</option>
+              <option value="Two-Branch Concat">Two-Branch Concat</option>
+            </select>
+            <button id="mb-load-preset" class="secondary-btn">📦 Load</button>
             <button id="mb-save" class="primary-btn">💾 Save Graph</button>
             <button id="mb-close" class="secondary-btn">Close</button>
           </div>
@@ -92,6 +268,15 @@
       if (btn){ btn.addEventListener('click', ()=>{ addNode(type, params); }); }
     });
     root.querySelector('#mb-save')?.addEventListener('click', saveGraph);
+    root.querySelector('#mb-load-preset')?.addEventListener('click', ()=>{
+      const sel = root.querySelector('#mb-preset');
+      const name = sel ? sel.value : '';
+      if (!name) return;
+      // confirm overwrite if existing graph is non-empty
+      const hasExisting = (state.graph.nodes && state.graph.nodes.length) || (state.graph.edges && state.graph.edges.length);
+      if (hasExisting && !confirm('Replace current graph with preset "'+name+'"?')) return;
+      loadPreset(name);
+    });
     root.querySelector('#mb-close')?.addEventListener('click', close);
   }
 
@@ -120,6 +305,15 @@
   function draw(){
     drawSVG();
     drawProps();
+  }
+
+  function loadPreset(name){
+    const spec = PRESETS[name];
+    if (!spec) return;
+    // Deep clone to avoid sharing references
+    state.graph = JSON.parse(JSON.stringify({ nodes: spec.nodes || [], edges: spec.edges || [], input_shape: spec.input_shape || [224,224,3] }));
+    // Ensure node IDs are unique and edges reference them; keep provided IDs
+    draw();
   }
 
   // SVG editor state and helpers
@@ -220,10 +414,13 @@
     const top=document.createElementNS(NS,'polygon'); top.setAttribute('points', [[x,y],[x+d,y-d],[x+w+d,y-d],[x+w,y]].map(p=>p.join(',')).join(' ')); top.setAttribute('fill', cTop); g.appendChild(top);
     const side=document.createElementNS(NS,'polygon'); side.setAttribute('points', [[x+w,y],[x+w+d,y-d],[x+w+d,y+h-d],[x+w,y+h]].map(p=>p.join(',')).join(' ')); side.setAttribute('fill', cSide); g.appendChild(side);
     const front=document.createElementNS(NS,'rect'); front.setAttribute('class','front'); front.setAttribute('x',x); front.setAttribute('y',y); front.setAttribute('width',w); front.setAttribute('height',h); front.setAttribute('rx',6); front.setAttribute('fill', cFront); front.setAttribute('stroke','rgba(0,0,0,0.25)'); g.appendChild(front);
-    const label=document.createElementNS(NS,'text'); label.setAttribute('x',x+14); label.setAttribute('y',y+26); label.setAttribute('fill','#e5e7eb'); label.setAttribute('font-size','14'); label.textContent=node.type; g.appendChild(label);
-    const params=document.createElementNS(NS,'text'); params.setAttribute('x',x+14); params.setAttribute('y',y+48); params.setAttribute('fill','#cdd5e0'); params.setAttribute('font-size','12'); params.textContent=summarizeParams(node.params); g.appendChild(params);
-    const inPort=document.createElementNS(NS,'circle'); inPort.setAttribute('class','port'); inPort.setAttribute('data-port','in'); inPort.setAttribute('cx',x-8); inPort.setAttribute('cy',y+h/2); inPort.setAttribute('r',7); inPort.setAttribute('fill','#60a5fa'); g.appendChild(inPort);
-    const outPort=document.createElementNS(NS,'circle'); outPort.setAttribute('class','port'); outPort.setAttribute('data-port','out'); outPort.setAttribute('cx',x+w+8); outPort.setAttribute('cy',y+h/2); outPort.setAttribute('r',7); outPort.setAttribute('fill','#38bdf8'); g.appendChild(outPort);
+
+    // Tooltip (native title) for minimal UI
+    const title=document.createElementNS(NS,'title');
+    title.textContent = `${node.type}${Object.keys(node.params||{}).length? ' — '+summarizeParams(node.params):''}`;
+    g.appendChild(title);
+    const inPort=document.createElementNS(NS,'circle'); inPort.setAttribute('class','port'); inPort.setAttribute('data-port','in'); inPort.setAttribute('cx',x-6); inPort.setAttribute('cy',y+h/2); inPort.setAttribute('r',5); inPort.setAttribute('fill','#60a5fa'); g.appendChild(inPort);
+    const outPort=document.createElementNS(NS,'circle'); outPort.setAttribute('class','port'); outPort.setAttribute('data-port','out'); outPort.setAttribute('cx',x+w+6); outPort.setAttribute('cy',y+h/2); outPort.setAttribute('r',5); outPort.setAttribute('fill','#38bdf8'); g.appendChild(outPort);
 
     g.addEventListener('click', (e)=>{ if (e.target.classList.contains('port')) return; state.selectedNodeId=node.id; drawProps(); document.querySelectorAll('.node').forEach(n=>n.classList.remove('mb-selected')); g.classList.add('mb-selected'); });
     g.addEventListener('mousedown', e=>{ if (e.target.classList.contains('port')) return; const start=svgCtx.svgPoint(e.clientX,e.clientY); const ox=node.ui.x, oy=node.ui.y; g.classList.add('dragging'); const move=ev=>{ const p=svgCtx.svgPoint(ev.clientX,ev.clientY); const dx=p.x-start.x; const dy=p.y-start.y; node.ui.x=snap(ox+dx,10); node.ui.y=snap(oy+dy,10); drawSVG(); }; const up=()=>{ window.removeEventListener('mousemove', move); window.removeEventListener('mouseup', up); g.classList.remove('dragging'); }; window.addEventListener('mousemove', move); window.addEventListener('mouseup', up, { once:true }); });
@@ -235,8 +432,22 @@
   function edgePath(p1,p2){ const dx=Math.max(40, Math.abs(p2.x-p1.x)*0.4); return `M ${p1.x},${p1.y} C ${p1.x+dx},${p1.y} ${p2.x-dx},${p2.y} ${p2.x},${p2.y}`; }
   function selectEdge(edge, pathEl, evt){ evt.stopPropagation(); document.querySelectorAll('.edge').forEach(p=>p.classList.remove('selected')); pathEl.classList.add('selected'); state.selectedNodeId=null; drawProps(); }
   function summarizeParams(p){ if (!p) return ''; const keys=Object.keys(p); return keys.slice(0,3).map(k=>`${k}:${p[k]}`).join(', ') + (keys.length>3?'…':''); }
-  function guessWidth(n){ const base=140; const extra=/Conv|Concat|Add|Dense/.test(n.type)?40:0; return base+extra; }
-  function pickColor(type){ if (/Input/i.test(type)) return '#2d3748'; if (/Conv/i.test(type)) return '#1f6feb'; if (/Pool/i.test(type)) return '#0ea5e9'; if (/Dense/i.test(type)) return '#16a34a'; if (/Batch|Norm/i.test(type)) return '#7c3aed'; if (/Dropout/i.test(type)) return '#f59e0b'; if (/Flatten/i.test(type)) return '#ef4444'; if (/Add|Concat/i.test(type)) return '#71717a'; return '#334155'; }
+  function guessWidth(n){ const base=120; const extra=/Conv|Concat|Add|Dense/.test(n.type)?20:0; return base+extra; }
+  function pickColor(type){
+    // Distinct palette per type for quick recognition
+    if (/Input/i.test(type)) return '#4b5563'; // slate gray
+    if (/SeparableConv/i.test(type)) return '#d97706'; // amber
+    if (/Conv/i.test(type)) return '#2563eb'; // blue
+    if (/Pool/i.test(type)) return '#059669'; // emerald
+    if (/Batch|Norm/i.test(type)) return '#9333ea'; // purple
+    if (/Activation|Act/i.test(type)) return '#f43f5e'; // rose
+    if (/Dropout/i.test(type)) return '#f59e0b'; // amber light
+    if (/Flatten/i.test(type)) return '#ef4444'; // red
+    if (/Dense/i.test(type)) return '#16a34a'; // green
+    if (/Add/i.test(type)) return '#64748b'; // slate
+    if (/Concat/i.test(type)) return '#0ea5e9'; // sky
+    return '#334155';
+  }
   function shade(hex, percent){ let f=parseInt(hex.slice(1),16), t=percent<0?0:255, p=Math.abs(percent)/100; let R=f>>16, G=f>>8&0x00FF, B=f&0x0000FF; const to=x=>Math.round((t-x)*p)+x; return '#' + (0x1000000 + (to(R)<<16) + (to(G)<<8) + (to(B))).toString(16).slice(1); }
   function snap(v, step){ return Math.round(v/step)*step; }
   function clamp(v,a,b){ return Math.max(a, Math.min(b, v)); }

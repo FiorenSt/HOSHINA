@@ -1,25 +1,323 @@
 from fastapi import APIRouter, HTTPException, Depends, Query, Body, File, UploadFile
 from fastapi.responses import FileResponse, StreamingResponse, JSONResponse
 from typing import List, Optional, Dict, Any
+from dataclasses import dataclass
+from threading import Thread, Lock
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy import text
 from sqlmodel import select, col, func
 from ..db import get_session, DatasetItem, LabelEvent, Embedding, Prediction, ClassDef, UMAPCoords, recreate_database
-from ..utils import get_or_make_thumb, get_or_make_triplet_thumb, bytes_to_np, np_to_bytes, probs_to_margin, farthest_first, safe_open_image, get_or_make_composite_thumb, get_or_make_full_png, ensure_placeholder_thumb
-from .. import thumb_worker
+from ..utils import bytes_to_np, np_to_bytes, probs_to_margin, farthest_first, safe_open_image, compute_file_hash
 from ..embeddings import compute_embedding
 from ..training import Trainer
 from .. import tf_training
-from ..config import THUMB_DIR, STORE_DIR, MAX_PAGE_SIZE, UMAP_CACHE
+from ..config import STORE_DIR, MAX_PAGE_SIZE, UMAP_CACHE
 from ..grouping import load_config as load_grouping, get_config_dict as grouping_get, set_config as grouping_set, match_role_and_base, expected_paths, group_items, resolve_existing_role_file
 import shutil
 from .. import config as cfg
 from pathlib import Path
 import numpy as np
-import io, csv, json, datetime as dt, zipfile
+import io, csv, json, datetime as dt, zipfile, ast
 from .. import ingest_worker
 
 router = APIRouter()
+
+# ====== Background Predictions Runner (batching) ======
+
+@dataclass
+class _PredStatus:
+    running: bool = False
+    total_groups: int = 0
+    processed_groups: int = 0
+    message: str = ""
+    repredict_all: bool = False
+    batch_size: int = 200
+    current_batch: int = 0
+    total_batches: int = 0
+
+_pred_status = _PredStatus()
+_pred_lock = Lock()
+_pred_worker: Optional[Thread] = None
+_pred_cancel = False
+
+def _set_pred_status(**kwargs):
+    global _pred_status
+    with _pred_lock:
+        for k, v in kwargs.items():
+            setattr(_pred_status, k, v)
+
+def _get_pred_status() -> _PredStatus:
+    with _pred_lock:
+        return _PredStatus(**_pred_status.__dict__)
+
+@router.post("/predictions/run/start")
+def predictions_run_start(
+    repredict_all: bool = Body(False),
+    batch_size: int = Body(200),
+    session=Depends(get_session)
+):
+    global _pred_worker, _pred_cancel
+    with _pred_lock:
+        if _pred_status.running:
+            return {"ok": False, "msg": "Prediction run already in progress"}
+        _pred_cancel = False
+        _pred_status = _PredStatus(running=True, total_groups=0, processed_groups=0, message="Starting...", repredict_all=bool(repredict_all), batch_size=int(max(1, batch_size)) )
+
+    def work():
+        global _pred_cancel
+        try:
+            # Build groups
+            from collections import defaultdict
+            items = session.exec(select(DatasetItem)).all()
+            pred_rows = session.exec(select(Prediction)).all()
+            already_ids = {p.item_id for p in pred_rows}
+
+            groups: dict[tuple[Path, str], list[DatasetItem]] = defaultdict(list)
+            for it in items:
+                p = Path(it.path)
+                name_lower = p.name.lower()
+                base = None
+                for suf in ["_target.fits", "_ref.fits", "_diff.fits"]:
+                    if name_lower.endswith(suf):
+                        base = p.name[: -len(suf)]
+                        break
+                if base is None:
+                    continue
+                groups[(p.parent, base)].append(it)
+
+            group_keys = list(groups.keys())
+            group_keys.sort(key=lambda k: (str(k[0]), k[1]))
+            # Only groups not fully predicted unless repredict_all
+            if not _get_pred_status().repredict_all:
+                group_keys = [k for k in group_keys if not all(m.id in already_ids for m in groups[k])]
+
+            total = len(group_keys)
+            bs = max(1, _get_pred_status().batch_size)
+            try:
+                import math as _math
+                total_batches = int(_math.ceil(total / float(bs))) if total > 0 else 0
+            except Exception:
+                total_batches = (total + bs - 1) // bs if total > 0 else 0
+            _set_pred_status(total_groups=int(total), processed_groups=0, message="Prepared", current_batch=0, total_batches=int(total_batches))
+            if total == 0:
+                _set_pred_status(running=False, message="No groups to predict")
+                return
+
+            # Try classic trainer first
+            trainer = Trainer(STORE_DIR)
+            trainer.load()
+            use_classic = trainer.clf is not None
+
+            # TF fallback setup (lazily load)
+            tf_model = None
+            preprocess = None
+            input_size = (224, 224)
+            class_to_idx: Dict[str, int] = {}
+            remap: Dict[int, int] = {}
+
+            def ensure_tf_loaded():
+                nonlocal tf_model, preprocess, input_size, class_to_idx, remap
+                if tf_model is not None:
+                    return
+                import tensorflow as tf  # type: ignore
+                model_path = STORE_DIR / "model" / "tf" / "model.keras"
+                if not model_path.exists():
+                    raise RuntimeError("No TF model found for fallback")
+                st = tf_training.get_status()
+                model_id = st.model_name or "mobilenet_v2"
+                params = st.params or {}
+                input_mode = (params.get("input_mode") or "triplet").lower()
+                single_role = params.get("single_role", "target")
+                class_map_raw = params.get("class_map")
+                try:
+                    class_to_idx = ast.literal_eval(class_map_raw) if class_map_raw else None
+                except Exception:
+                    class_to_idx = None
+                if not class_to_idx:
+                    names = [c.name for c in session.exec(select(ClassDef).order_by(ClassDef.order)).all()]
+                    class_to_idx = {name: i for i, name in enumerate(names)}
+                def _preprocess_for_model(mid: str):
+                    mid = (mid or "").lower()
+                    if mid == "efficientnet_b0":
+                        from tensorflow.keras.applications import efficientnet as app  # type: ignore
+                        return app.preprocess_input
+                    if mid == "resnet50":
+                        from tensorflow.keras.applications import resnet50 as app  # type: ignore
+                        return app.preprocess_input
+                    from tensorflow.keras.applications import mobilenet_v2 as app  # type: ignore
+                    return app.preprocess_input
+                preprocess = _preprocess_for_model(model_id)
+                tf_model = tf.keras.models.load_model(model_path)
+                try:
+                    ish = tf_model.input_shape
+                    input_size = (int(ish[1]), int(ish[2])) if isinstance(ish, (list, tuple)) and len(ish) >= 3 else (224, 224)
+                except Exception:
+                    input_size = (224, 224)
+                # remap targets to dense indices
+                unique_targets = sorted(set(int(v) for v in class_to_idx.values()))
+                remap = {t: i for i, t in enumerate(unique_targets)}
+                # store back convenience fields on status
+                return input_mode, single_role
+
+            # Embeddings for classic
+            emb_map = {e.item_id: bytes_to_np(e.vector) for e in session.exec(select(Embedding)).all()} if use_classic else {}
+
+            bs = max(1, _get_pred_status().batch_size)
+            processed = 0
+            idx = 0
+            batch_index = 0
+            while idx < total and not _pred_cancel:
+                batch_keys = group_keys[idx: idx + bs]
+                idx += len(batch_keys)
+                batch_index += 1
+                try:
+                    if use_classic:
+                        # representatives with embeddings
+                        def role_rank(path_str: str) -> int:
+                            s = path_str.lower()
+                            if s.endswith("_target.fits"): return 0
+                            if s.endswith("_ref.fits"): return 1
+                            if s.endswith("_diff.fits"): return 2
+                            return 3
+                        rep_ids: List[int] = []
+                        rep_to_members: List[tuple[int, List[DatasetItem]]] = []
+                        for key in batch_keys:
+                            members = groups[key]
+                            members_sorted = sorted(members, key=lambda m: role_rank(m.path))
+                            rep = next((m for m in members_sorted if m.id in emb_map), None)
+                            if rep is None:
+                                continue
+                            rep_ids.append(rep.id)
+                            rep_to_members.append((rep.id, members))
+                        if rep_ids:
+                            import numpy as _np
+                            X = _np.stack([emb_map[i] for i in rep_ids], axis=0)
+                            probs = trainer.predict_proba(X)
+                            classes = trainer.classes_ or []
+                            for (rep_iid, members), pr in zip(rep_to_members, probs):
+                                prob_map = {cls: float(p) for cls, p in zip(classes, pr)}
+                                pv = _np.array(list(prob_map.values()))
+                                order = _np.argsort(-pv) if len(pv) else []
+                                pred_lbl = classes[int(order[0])] if len(order) else None
+                                if len(pv) >= 2:
+                                    sorted_pv = _np.sort(pv)
+                                    maxp = float(sorted_pv[-1])
+                                    margin = float(sorted_pv[-1] - sorted_pv[-2])
+                                elif len(pv) == 1:
+                                    maxp = float(pv[0])
+                                    margin = float(1.0 - pv[0])
+                                else:
+                                    maxp = None
+                                    margin = None
+                                for m in members:
+                                    existing = session.get(Prediction, m.id)
+                                    if existing:
+                                        existing.proba_json = json.dumps(prob_map)
+                                        existing.pred_label = pred_lbl
+                                        existing.margin = margin
+                                        existing.max_proba = maxp
+                                        existing.updated_at = dt.datetime.utcnow()
+                                        session.add(existing)
+                                    else:
+                                        session.add(Prediction(item_id=m.id, proba_json=json.dumps(prob_map), pred_label=pred_lbl, margin=margin, max_proba=maxp))
+                            session.commit()
+                            processed += len(rep_ids)
+                    else:
+                        # TF fallback
+                        in_mode, single_role = ensure_tf_loaded()
+                        import numpy as _np
+                        from .utils import safe_open_image as _safe_open_image
+                        for parent, base in batch_keys:
+                            if _pred_cancel:
+                                break
+                            members = groups[(parent, base)]
+                            # choose candidate
+                            candidate = None
+                            for role_suf in ["_target.fits", "_ref.fits", "_diff.fits"]:
+                                cp = parent / f"{base}{role_suf}"
+                                if cp.exists():
+                                    candidate = cp
+                                    break
+                            if candidate is None:
+                                continue
+                            if (in_mode or "triplet") == "triplet":
+                                arr = tf_training._compose_triplet_array(candidate, input_size)  # type: ignore[attr-defined]
+                            else:
+                                role = (single_role or "target").lower()
+                                rp = parent / f"{base}_{role}.fits"
+                                if rp.exists():
+                                    img = _safe_open_image(rp).convert("L").resize(input_size)
+                                    g = _np.asarray(img, dtype=_np.float32)
+                                    arr = _np.stack([g, g, g], axis=-1)
+                                else:
+                                    img = _safe_open_image(candidate).convert("RGB").resize(input_size)
+                                    arr = _np.asarray(img, dtype=_np.float32)
+                            x = preprocess(arr)
+                            x = _np.expand_dims(x, axis=0)
+                            pr = tf_model.predict(x, verbose=0)[0]
+                            # build prob map via class_to_idx and remap
+                            prob_map: Dict[str, float] = {}
+                            for name, tgt in class_to_idx.items():
+                                ridx = remap.get(int(tgt))
+                                if ridx is not None and 0 <= ridx < len(pr):
+                                    prob_map[name] = float(pr[ridx])
+                            pv = _np.array(list(prob_map.values()))
+                            if len(pv) > 0:
+                                order = _np.argsort(-pv)
+                                pred_lbl = list(prob_map.keys())[int(order[0])]
+                                margin = float(pv[order[0]] - pv[order[1]]) if len(pv) > 1 else float(1.0 - pv[0])
+                                maxp = float(pv[order[0]])
+                            else:
+                                pred_lbl, margin, maxp = None, None, None
+                            for m in members:
+                                existing = session.get(Prediction, m.id)
+                                if existing:
+                                    existing.proba_json = json.dumps(prob_map)
+                                    existing.pred_label = pred_lbl
+                                    existing.margin = margin
+                                    existing.max_proba = maxp
+                                    existing.updated_at = dt.datetime.utcnow()
+                                    session.add(existing)
+                                else:
+                                    session.add(Prediction(item_id=m.id, proba_json=json.dumps(prob_map), pred_label=pred_lbl, margin=margin, max_proba=maxp))
+                            session.commit()
+                            processed += 1
+                except Exception as e:
+                    _set_pred_status(message=f"Batch error: {str(e)}")
+                finally:
+                    # Update status with batch counters and processed groups
+                    _set_pred_status(processed_groups=int(processed), current_batch=int(batch_index), message=f"Batch {batch_index}/{total_batches} • Processed {processed}/{total}")
+
+            if _pred_cancel:
+                _set_pred_status(running=False, message="Cancelled")
+            else:
+                _set_pred_status(running=False, message="Done")
+        except Exception as e:
+            _set_pred_status(running=False, message=f"Error: {str(e)}")
+
+    _pred_worker = Thread(target=work, daemon=True)
+    _pred_worker.start()
+    return {"ok": True}
+
+@router.get("/predictions/run/status")
+def predictions_run_status():
+    st = _get_pred_status()
+    return {
+        "running": st.running,
+        "total_groups": int(st.total_groups),
+        "processed_groups": int(st.processed_groups),
+        "message": st.message,
+        "batch_size": int(st.batch_size),
+        "repredict_all": bool(st.repredict_all),
+        "current_batch": int(st.current_batch),
+        "total_batches": int(st.total_batches),
+    }
+
+@router.post("/predictions/run/cancel")
+def predictions_run_cancel():
+    global _pred_cancel
+    _pred_cancel = True
+    return {"ok": True}
 
 def _classes(session) -> List[str]:
     rows = session.exec(select(ClassDef).order_by(ClassDef.order)).all()
@@ -134,14 +432,37 @@ def set_data_dir(payload: Dict[str, Any] = Body(...), session=Depends(get_sessio
                     canonical_rp = str(Path(rp).resolve())
                     existing = session.exec(select(DatasetItem).where(DatasetItem.path == canonical_rp)).first()
                     if existing:
+                        # Backfill content hash if missing
+                        try:
+                            if getattr(existing, "content_hash", None) is None:
+                                existing.content_hash = compute_file_hash(Path(canonical_rp))
+                                session.add(existing)
+                                session.commit()
+                        except Exception:
+                            pass
                         continue
                     try:
+                        # Dedup by content hash across paths
+                        c_hash = None
+                        try:
+                            c_hash = compute_file_hash(Path(rp))
+                            dup = session.exec(select(DatasetItem).where(DatasetItem.content_hash == c_hash)).first()
+                            if dup:
+                                if generate_pngs:
+                                    try:
+                                        get_or_make_full_png(rp)
+                                    except Exception:
+                                        pass
+                                continue
+                        except Exception:
+                            c_hash = None
+
                         img = safe_open_image(rp)
                         w, h = img.size
                     except Exception as e:
                         print(f"[skip] {rp} ({e})")
                         continue
-                    it = DatasetItem(path=canonical_rp, width=w, height=h)
+                    it = DatasetItem(path=canonical_rp, width=w, height=h, content_hash=c_hash)
                     session.add(it)
                     try:
                         session.commit()
@@ -169,14 +490,36 @@ def set_data_dir(payload: Dict[str, Any] = Body(...), session=Depends(get_sessio
                 canonical_f = str(f.resolve())
                 existing = session.exec(select(DatasetItem).where(DatasetItem.path == canonical_f)).first()
                 if existing:
+                    try:
+                        if getattr(existing, "content_hash", None) is None:
+                            existing.content_hash = compute_file_hash(Path(canonical_f))
+                            session.add(existing)
+                            session.commit()
+                    except Exception:
+                        pass
                     continue
                 try:
+                    # Dedup by content hash across paths
+                    c_hash = None
+                    try:
+                        c_hash = compute_file_hash(Path(f))
+                        dup = session.exec(select(DatasetItem).where(DatasetItem.content_hash == c_hash)).first()
+                        if dup:
+                            if generate_pngs:
+                                try:
+                                    get_or_make_full_png(f)
+                                except Exception:
+                                    pass
+                            continue
+                    except Exception:
+                        c_hash = None
+
                     img = safe_open_image(f)
                     w, h = img.size
                 except Exception as e:
                     print(f"[skip] {f} ({e})")
                     continue
-                it = DatasetItem(path=canonical_f, width=w, height=h)
+                it = DatasetItem(path=canonical_f, width=w, height=h, content_hash=c_hash)
                 session.add(it)
                 try:
                     session.commit()
@@ -208,9 +551,11 @@ def ingest_start(
     by_groups: bool = Body(False, embed=True),
     max_groups: Optional[int] = Body(None, embed=True),
     extensions: Optional[str] = Body(None, embed=True),
-    generate_pngs: bool = Body(True, embed=True),
     make_thumbs: bool = Body(True, embed=True),
     require_all_roles: Optional[bool] = Body(None, embed=True),
+    batch_size: int = Body(500, embed=True),
+    skip_hash: bool = Body(False, embed=True),
+    backfill_hashes: bool = Body(False, embed=True),
 ):
     try:
         base = Path(data_dir).resolve() if data_dir else cfg.DATA_DIR
@@ -223,9 +568,11 @@ def ingest_start(
             extensions=exts,
             by_groups=by_groups or (max_groups is not None),
             max_groups=max_groups,
-            generate_pngs=generate_pngs,
             make_thumbs=make_thumbs,
             require_all_roles=require_all_roles,
+            batch_size=int(max(1, batch_size)),
+            skip_hash=bool(skip_hash),
+            backfill_hashes=bool(backfill_hashes),
         )
         if isinstance(r, dict) and r.get("queued"):
             return {"ok": True, "queued": True, "position": int(r.get("position", 0))}
@@ -280,17 +627,21 @@ def set_classes(classes: List[Dict[str, Any]], session=Depends(get_session)):
 
 @router.get("/items")
 def list_items(
-    queue: str = Query("uncertain", enum=["uncertain","diverse","odd","band","all"]),
+    queue: str = Query("uncertain", enum=["uncertain","diverse","odd","band","all","certain"]),
     page: int = 1,
     page_size: int = 50,
     prob_low: float = 0.3,
     prob_high: float = 0.8,
+    class_name: str = Query("", description="For certain queue: filter by predicted class name (optional)"),
+    certain_thr: float = Query(0.9, description="Minimum probability for 'certain' queue"),
     unlabeled_only: bool = True,
     search: str = Query("", description="Search by filename"),
     label_filter: str = Query("", enum=["", "labeled", "unlabeled", "unsure", "skipped"]),
     simple: bool = Query(False, description="If true, skip heavy computations and just paginate"),
     only_ready: bool = Query(False, description="If true, include only groups with composite thumbs ready (size 256)"),
     seed: Optional[int] = Query(None, description="Stable seed for deterministic random order in 'all' queue"),
+    sort_pred: str = Query("", enum=["", "asc", "desc"], description="Global sort by predicted value: asc or desc"),
+    pos_class: str = Query("", description="Optional positive class name to score by p(class)") ,
     session=Depends(get_session)
 ):
     """List items paginated by triplet groups.
@@ -365,21 +716,8 @@ def list_items(
         rep_to_groupkey[rep.id] = key
 
         if only_ready:
-            parent = Path(rep.path).parent
-            cfg_local = cfg
-            _, base = match_role_and_base(Path(rep.path), cfg_local)
-            key_parts: list[str] = []
-            for role in cfg_local.roles:
-                rp = resolve_existing_role_file(parent, base, role, cfg_local)
-                key_parts.append(str(rp) if rp else "")
-            from ..utils import composite_thumb_path_for
-            ctp = composite_thumb_path_for(key_parts, size=256)
-            if not ctp.exists():
-                # Skip groups that are not ready if only_ready is requested
-                rep_ids.pop()
-                rep_to_members.pop(rep.id, None)
-                rep_to_groupkey.pop(rep.id, None)
-                continue
+            # On-the-fly generation doesn't need readiness filtering; treat all as ready
+            pass
 
     # Gather embeddings and predictions
     emb_map = {e.item_id: bytes_to_np(e.vector) for e in session.exec(select(Embedding)).all()}
@@ -390,7 +728,41 @@ def list_items(
     # Selection ordering by queue operates on representatives
     ordered_rep_ids: list[int] = rep_ids[:]
     try:
-        if queue == "all":
+        # If explicit predicted-probability sorting is requested, override queue ordering
+        if sort_pred in ("asc", "desc"):
+            def score_for_rep(rid: int) -> float:
+                try:
+                    probs_map, pred_lbl, _, maxp = preds_map.get(rid, ({}, None, None, None))
+                    # Prefer specified positive class probability when provided
+                    if pos_class:
+                        try:
+                            v = probs_map.get(pos_class)
+                            if v is not None:
+                                return float(v)
+                        except Exception:
+                            pass
+                    # Fall back to max_proba
+                    if maxp is not None:
+                        return float(maxp)
+                    # Finally, probability of predicted label if available
+                    if pred_lbl is not None and isinstance(probs_map, dict):
+                        v = probs_map.get(pred_lbl)
+                        if v is not None:
+                            return float(v)
+                except Exception:
+                    pass
+                return float("nan")
+
+            def key_fn(rid: int) -> float:
+                s = score_for_rep(rid)
+                if sort_pred == "asc":
+                    return s if np.isfinite(s) else float("inf")
+                else:
+                    # For descending, invert while pushing NaNs to the end consistently
+                    return (-s) if np.isfinite(s) else float("inf")
+
+            ordered_rep_ids = sorted(rep_ids, key=key_fn)
+        elif queue == "all":
             # Deterministic pseudo-random order per group using seed and group key
             if seed is not None:
                 import hashlib
@@ -467,6 +839,39 @@ def list_items(
                         band_scores.append(abs(0.5 - maxp))
             order = np.argsort(band_scores) if band_scores else []
             ordered_rep_ids = [band_ids[i] for i in order] + [i for i in rep_ids if i not in band_ids]
+        elif queue == "certain":
+            # High-confidence certain predictions, optionally filtered by class_name
+            high_ids: list[int] = []
+            high_scores: list[float] = []
+            low_tail: list[int] = []
+            for i in rep_ids:
+                if i in preds_map:
+                    probs_map, pred_lbl, _, maxp = preds_map[i]
+                    if maxp is not None:
+                        # If class filter provided, ensure pred label matches and use that prob; otherwise use max_proba
+                        if class_name:
+                            try:
+                                pmap = probs_map if isinstance(probs_map, dict) else {}
+                                pv = float(pmap.get(class_name, -1.0)) if class_name in pmap else -1.0
+                            except Exception:
+                                pv = -1.0
+                            if pv >= float(certain_thr):
+                                high_ids.append(i)
+                                high_scores.append(-pv)
+                            else:
+                                low_tail.append(i)
+                        else:
+                            if float(maxp) >= float(certain_thr):
+                                high_ids.append(i)
+                                high_scores.append(-float(maxp))
+                            else:
+                                low_tail.append(i)
+                    else:
+                        low_tail.append(i)
+                else:
+                    low_tail.append(i)
+            order = np.argsort(high_scores) if high_scores else []
+            ordered_rep_ids = [high_ids[i] for i in order] + low_tail
     except Exception as _:
         # If any selection logic fails, fall back to baseline order
         ordered_rep_ids = rep_ids[:]
@@ -498,84 +903,69 @@ def list_items(
     return {"total": int(total_groups), "page": int(page), "page_size": int(page_size), "items": payload}
 
 @router.get("/thumb/{item_id}")
-def get_thumb(item_id: int, session=Depends(get_session)):
+def get_thumb(item_id: int, size: int = 256, session=Depends(get_session)):
     it = session.get(DatasetItem, item_id)
     if not it:
         raise HTTPException(status_code=404, detail="Item not found")
-    # Non-blocking: serve existing thumb or placeholder
     p = Path(it.path)
-    from ..utils import thumb_path_for
-    tp = thumb_path_for(p, size=256)
-    if tp.exists():
-        return FileResponse(tp, headers={"Cache-Control": "no-store"})
-    return FileResponse(ensure_placeholder_thumb(256), headers={"Cache-Control": "no-store"})
+    try:
+        img = safe_open_image(p).convert("RGB")
+        from PIL import ImageOps
+        img = ImageOps.exif_transpose(img)
+        img.thumbnail((int(size), int(size)))
+        buf = io.BytesIO()
+        img.save(buf, format="JPEG", quality=85)
+        buf.seek(0)
+        return StreamingResponse(buf, media_type="image/jpeg", headers={"Cache-Control": "no-store"})
+    except Exception:
+        # Serve a simple gray square placeholder directly
+        from PIL import Image
+        s = int(size)
+        ph = Image.new("RGB", (s, s), color=(32, 32, 32))
+        buf = io.BytesIO()
+        ph.save(buf, format="JPEG", quality=70)
+        buf.seek(0)
+        return StreamingResponse(buf, media_type="image/jpeg", headers={"Cache-Control": "no-store"})
 
 @router.get("/triplet-thumb/{item_id}")
-def get_triplet_thumb(item_id: int, session=Depends(get_session)):
+def get_triplet_thumb(item_id: int, size: int = 256, session=Depends(get_session)):
     it = session.get(DatasetItem, item_id)
     if not it:
         raise HTTPException(status_code=404, detail="Item not found")
 
     p = Path(it.path)
-    # Resolve triplet using grouping config (supports custom suffixes)
+    # Resolve roles and compose on-the-fly (no disk caching)
     cfg = load_grouping()
     _, base = match_role_and_base(p, cfg)
     target = resolve_existing_role_file(p.parent, base, "target", cfg) if "target" in cfg.roles else None
     ref = resolve_existing_role_file(p.parent, base, "ref", cfg) if "ref" in cfg.roles else None
     diff = resolve_existing_role_file(p.parent, base, "diff", cfg) if "diff" in cfg.roles else None
 
-    expected = {
-        "target": p.with_name(f"{base}_target.fits"),
-        "ref": p.with_name(f"{base}_ref.fits"),
-        "diff": p.with_name(f"{base}_diff.fits"),
-    }
-
-    # Only include files that actually exist
-    target = expected["target"] if expected["target"].exists() else None
-    ref = expected["ref"] if expected["ref"].exists() else None
-    diff = expected["diff"] if expected["diff"].exists() else None
-
-    # Non-blocking: if none exist, serve single-thumb placeholder; if expected triplet, serve placeholder
-    if not any([target, ref, diff]):
-        from ..utils import thumb_path_for
-        single_tp = thumb_path_for(p, size=256)
-        if single_tp.exists():
-            return FileResponse(single_tp, headers={"Cache-Control": "no-store"})
-        return FileResponse(ensure_placeholder_thumb(256), headers={"Cache-Control": "no-store"})
-
-    # Try precomputed triplet thumb path convention
-    from ..utils import triplet_thumb_path_for, thumb_path_for
-    parts = [str(x) if x else "" for x in [target, ref, diff]]
-    base_key = "|".join(parts) + "|256"
-    ttp = triplet_thumb_path_for(base_key, size=256)
-    if ttp.exists():
-        return FileResponse(ttp, headers={"Cache-Control": "no-store"})
-    # Compose a quick triplet from available single thumbs (non-blocking)
-    try:
-        from PIL import Image
-        panels = []
-        for rp in [target, ref, diff]:
-            if rp:
-                st = thumb_path_for(Path(rp), size=256)
-                if st.exists():
-                    panels.append(Image.open(st).convert("RGB"))
-                else:
-                    panels.append(Image.new("RGB", (256, 256), color=(32,32,32)))
+    s = int(size)
+    from PIL import Image, ImageOps
+    panels = []
+    for rp in [target, ref, diff]:
+        try:
+            if rp and Path(rp).exists():
+                img = safe_open_image(Path(rp)).convert("RGB")
             else:
-                panels.append(Image.new("RGB", (256, 256), color=(32,32,32)))
-        out = Image.new("RGB", (256*3, 256), color=(0,0,0))
-        for i, pi in enumerate(panels[:3]):
-            # center paste to handle any minor size differences
-            w, h = pi.size
-            cx = max(0, (256 - w)//2)
-            cy = max(0, (256 - h)//2)
-            out.paste(pi, (i*256 + cx, cy))
-        # Cache and serve
-        ttp.parent.mkdir(parents=True, exist_ok=True)
-        out.save(ttp, format="JPEG", quality=85)
-        return FileResponse(ttp, headers={"Cache-Control": "no-store"})
-    except Exception:
-        return FileResponse(ensure_placeholder_thumb(256), headers={"Cache-Control": "no-store"})
+                img = Image.new("RGB", (s, s), color=(0,0,0))
+        except Exception:
+            img = Image.new("RGB", (s, s), color=(0,0,0))
+        img = ImageOps.exif_transpose(img)
+        img.thumbnail((s, s))
+        canvas = Image.new("RGB", (s, s), color=(0,0,0))
+        x = (s - img.width) // 2
+        y = (s - img.height) // 2
+        canvas.paste(img, (x, y))
+        panels.append(canvas)
+    out = Image.new("RGB", (s * 3, s), color=(0,0,0))
+    for i, panel in enumerate(panels[:3]):
+        out.paste(panel, (i * s, 0))
+    buf = io.BytesIO()
+    out.save(buf, format="JPEG", quality=85)
+    buf.seek(0)
+    return StreamingResponse(buf, media_type="image/jpeg", headers={"Cache-Control": "no-store"})
 
 
 @router.get("/group-thumb/{item_id}")
@@ -586,73 +976,54 @@ def get_group_thumb(item_id: int, size: int = 256, session=Depends(get_session))
     p = Path(it.path)
     cfg = load_grouping()
     _, base = match_role_and_base(p, cfg)
-    # Non-blocking composite: return existing composite or fallback to any single thumb, else placeholder
-    from ..utils import composite_thumb_path_for, thumb_path_for
-    key_parts: list[str] = []
+    # Compose N-role strip on-the-fly
+    from PIL import Image, ImageOps
+    s = int(size)
     cfg = load_grouping()
+    panels = []
     for role in cfg.roles:
         rp = resolve_existing_role_file(p.parent, base, role, cfg)
-        key_parts.append(str(rp) if rp else "")
-    ctp = composite_thumb_path_for(key_parts, size=size)
-    if ctp.exists():
-        return FileResponse(ctp, headers={"Cache-Control": "no-store"})
-    # Fallback: compose from available single thumbs (non-blocking)
-    try:
-        from PIL import Image
-        panels = []
-        for role in cfg.roles:
-            rp = resolve_existing_role_file(p.parent, base, role, cfg)
-            if rp:
-                st = thumb_path_for(Path(rp), size=size)
-                if st.exists():
-                    panels.append(Image.open(st).convert("RGB"))
-                else:
-                    panels.append(Image.new("RGB", (size, size), color=(32,32,32)))
+        try:
+            if rp and Path(rp).exists():
+                img = safe_open_image(Path(rp)).convert("RGB")
             else:
-                panels.append(Image.new("RGB", (size, size), color=(32,32,32)))
-        out = Image.new("RGB", (size*max(1,len(panels)), size), color=(0,0,0))
-        for i, pi in enumerate(panels):
-            w, h = pi.size
-            cx = max(0, (size - w)//2)
-            cy = max(0, (size - h)//2)
-            out.paste(pi, (i*size + cx, cy))
-        ctp.parent.mkdir(parents=True, exist_ok=True)
-        out.save(ctp, format="JPEG", quality=85)
-        return FileResponse(ctp, headers={"Cache-Control": "no-store"})
-    except Exception:
-        return FileResponse(ensure_placeholder_thumb(size), headers={"Cache-Control": "no-store"})
+                img = Image.new("RGB", (s, s), color=(0,0,0))
+        except Exception:
+            img = Image.new("RGB", (s, s), color=(0,0,0))
+        img = ImageOps.exif_transpose(img)
+        img.thumbnail((s, s))
+        canvas = Image.new("RGB", (s, s), color=(0,0,0))
+        x = (s - img.width) // 2
+        y = (s - img.height) // 2
+        canvas.paste(img, (x, y))
+        panels.append(canvas)
+    out = Image.new("RGB", (s * max(1, len(panels)), s), color=(0,0,0))
+    for i, pi in enumerate(panels):
+        out.paste(pi, (i * s, 0))
+    buf = io.BytesIO()
+    out.save(buf, format="JPEG", quality=85)
+    buf.seek(0)
+    return StreamingResponse(buf, media_type="image/jpeg", headers={"Cache-Control": "no-store"})
 
 @router.get("/file/{item_id}")
 def get_file(item_id: int, session=Depends(get_session)):
     it = session.get(DatasetItem, item_id)
     if not it:
         raise HTTPException(status_code=404, detail="Item not found")
-    
     file_path = Path(it.path)
-    
-    # For FITS, serve cached full-resolution PNG from cache/png
+    # For FITS, render on-the-fly and stream as PNG
     if file_path.suffix.lower() == '.fits':
         try:
-            pp = get_or_make_full_png(file_path)
-            return FileResponse(pp, media_type="image/png")
+            from PIL import Image
+            img = safe_open_image(file_path).convert("RGB")
+            buf = io.BytesIO()
+            img.save(buf, format="PNG")
+            buf.seek(0)
+            return StreamingResponse(buf, media_type="image/png")
         except Exception as e:
-            raise HTTPException(status_code=500, detail=f"Failed to generate PNG: {str(e)}")
+            raise HTTPException(status_code=500, detail=f"Failed to render FITS: {str(e)}")
     # For other image formats, serve directly
     return FileResponse(file_path)
-
-
-@router.get("/file-png/{item_id}")
-def get_file_png(item_id: int, session=Depends(get_session)):
-    it = session.get(DatasetItem, item_id)
-    if not it:
-        raise HTTPException(status_code=404, detail="Item not found")
-    file_path = Path(it.path)
-    try:
-        pp = get_or_make_full_png(file_path)
-        return FileResponse(pp, media_type="image/png")
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to generate PNG: {str(e)}")
-
 
 @router.post("/dataset/reset")
 def dataset_reset(
@@ -675,13 +1046,7 @@ def dataset_reset(
     try:
         print("[reset] Starting reset operation...")
         
-        # Cancel any running thumb job
-        try:
-            if thumb_worker.is_running():
-                print("[reset] Cancelling running thumbnail job...")
-                thumb_worker.cancel()
-        except Exception as e:
-            print(f"[reset] Warning: Could not cancel thumb job: {e}")
+        # Thumbnail background worker removed
 
         # Either recreate DB file or wipe tables
         if recreate_db:
@@ -746,39 +1111,11 @@ def dataset_reset(
             session.commit()
             print("[reset] Database wipe completed")
 
-        # Wipe caches on disk
+        # Wipe caches on disk (no-op for thumbnails in on-the-fly mode)
         if wipe_caches:
-            print("[reset] Clearing file caches...")
+            print("[reset] Clearing caches (no persistent thumbnails)...")
             try:
-                # Count and remove thumbnails
-                thumb_count = 0
-                if THUMB_DIR.exists():
-                    thumb_files = list(THUMB_DIR.glob("**/*"))
-                    thumb_count = sum(1 for p in thumb_files if p.is_file())
-                    print(f"[reset] Removing {thumb_count} thumbnail files...")
-                    for p in thumb_files:
-                        try:
-                            if p.is_file():
-                                p.unlink(missing_ok=True)
-                        except Exception as e:
-                            print(f"[reset] Warning: Could not delete {p}: {e}")
-                
-                # Count and remove cache subdirs
-                cache_count = 0
-                if (STORE_DIR / "cache").exists():
-                    cache_items = list((STORE_DIR / "cache").iterdir())
-                    cache_count = len(cache_items)
-                    print(f"[reset] Removing {cache_count} cache items...")
-                    for sub in cache_items:
-                        try:
-                            if sub.is_dir():
-                                shutil.rmtree(sub, ignore_errors=True)
-                            elif sub.is_file():
-                                sub.unlink(missing_ok=True)
-                        except Exception as e:
-                            print(f"[reset] Warning: Could not delete {sub}: {e}")
-                
-                print(f"[reset] Cache cleanup completed: {thumb_count} thumbnails, {cache_count} cache items")
+                pass
             except Exception as e:
                 print(f"[reset] Warning: Cache cleanup had errors: {e}")
 
@@ -787,36 +1124,7 @@ def dataset_reset(
     except Exception as e:
         return {"ok": False, "msg": f"Reset failed: {str(e)}"}
 
-@router.post("/thumbs/build/start")
-def thumbs_build_start(
-    mode: str = Body("triplet", embed=True),
-    size: int = Body(256, embed=True),
-    only_missing: bool = Body(True, embed=True),
-    limit: Optional[int] = Body(None, embed=True),
-):
-    try:
-        if thumb_worker.is_running():
-            return {"ok": False, "msg": "Thumbnail build already running"}
-        thumb_worker.start(mode=mode, size=size, only_missing=only_missing, limit=limit)
-        return {"ok": True}
-    except Exception as e:
-        return {"ok": False, "msg": str(e)}
-
-@router.get("/thumbs/build/status")
-def thumbs_build_status():
-    try:
-        st = thumb_worker.status()
-        return {"ok": True, **st}
-    except Exception as e:
-        return {"ok": False, "msg": str(e)}
-
-@router.post("/thumbs/build/cancel")
-def thumbs_build_cancel():
-    try:
-        thumb_worker.cancel()
-        return {"ok": True}
-    except Exception as e:
-        return {"ok": False, "msg": str(e)}
+# Thumbnail builder endpoints removed: thumbnails are generated on-the-fly now
 
 @router.get("/triplet/{item_id}")
 def get_triplet(item_id: int, session=Depends(get_session)):
@@ -863,6 +1171,7 @@ def set_label(
     user: Optional[str] = Body(None),
     session=Depends(get_session)
 ):
+    deleted = 0
     for iid in item_ids:
         it = session.get(DatasetItem, iid)
         if not it:
@@ -874,8 +1183,13 @@ def set_label(
         ev = LabelEvent(item_id=iid, prev_label=prev, new_label=it.label, unsure=unsure, skipped=skip, user=user)
         session.add(ev)
         session.add(it)
+        # Best-effort: remove associated thumbnails for this group's views
+        try:
+            deleted += delete_thumbnails_for_path(Path(it.path), sizes=[256])
+        except Exception:
+            pass
     session.commit()
-    return {"ok": True}
+    return {"ok": True, "deleted_thumbs": int(deleted)}
 
 @router.post("/batch-label")
 def batch_label_items(
@@ -892,6 +1206,7 @@ def batch_label_items(
             return {"ok": False, "msg": "No items provided"}
         
         success_count = 0
+        deleted = 0
         for iid in item_ids:
             it = session.get(DatasetItem, iid)
             if not it:
@@ -904,9 +1219,14 @@ def batch_label_items(
             session.add(ev)
             session.add(it)
             success_count += 1
+            # Cleanup thumbnails for this item/group
+            try:
+                deleted += delete_thumbnails_for_path(Path(it.path), sizes=[256])
+            except Exception:
+                pass
         
         session.commit()
-        return {"ok": True, "labeled_count": success_count}
+        return {"ok": True, "labeled_count": success_count, "deleted_thumbs": int(deleted)}
     except Exception as e:
         return {"ok": False, "msg": f"Batch labeling failed: {str(e)}"}
 
@@ -950,8 +1270,17 @@ def train_now(session=Depends(get_session)):
             pv = np.array(list(prob_map.values()))
             order = np.argsort(-pv)
             pred_lbl = classes[int(order[0])] if len(classes)>0 else None
-            margin = float(pv[0]-pv[1]) if len(classes) > 1 else float(1.0 - pv[0])
-            maxp = float(pv[0]) if len(pv)>0 else None
+            # Use top-2 sorted probabilities for margin and top-1 for max
+            if len(pv) >= 2:
+                sorted_pv = np.sort(pv)
+                maxp = float(sorted_pv[-1])
+                margin = float(sorted_pv[-1] - sorted_pv[-2])
+            elif len(pv) == 1:
+                maxp = float(pv[0])
+                margin = float(1.0 - pv[0])
+            else:
+                maxp = None
+                margin = None
             p = Prediction(item_id=iid, proba_json=json.dumps(prob_map), pred_label=pred_lbl, margin=margin, max_proba=maxp)
             # upsert
             existing = session.get(Prediction, iid)
@@ -989,9 +1318,23 @@ def train_start(
     split_pct: int = Body(85),
     split_strategy: str = Body("natural"),
     single_role: str = Body("target", description="For single mode: one of target/ref/diff"),
+    loss: str = Body("sparse_categorical_crossentropy"),
+    class_weight: Optional[Dict[str, float]] = Body(default=None),
 ):
     try:
-        tf_training.start_training(model_id=model, epochs=epochs, batch_size=batch_size, augment=augment, input_mode=input_mode, class_map=class_map or None, split_pct=split_pct, split_strategy=split_strategy, single_role=single_role)
+        tf_training.start_training(
+            model_id=model,
+            epochs=epochs,
+            batch_size=batch_size,
+            augment=augment,
+            input_mode=input_mode,
+            class_map=class_map or None,
+            split_pct=split_pct,
+            split_strategy=split_strategy,
+            single_role=single_role,
+            loss=loss,
+            class_weight=class_weight or None,
+        )
         return {"ok": True}
     except RuntimeError as e:
         return {"ok": False, "msg": str(e)}
@@ -1292,9 +1635,10 @@ def predictions_summary(session=Depends(get_session)):
 
         pred_rows = session.exec(select(Prediction)).all()
         predicted_ids = {pr.item_id for pr in pred_rows}
+        # A group counts as predicted only if ALL members have a Prediction row
         predicted_groups = 0
         for _, members in groups.items():
-            if any(m.id in predicted_ids for m in members):
+            if members and all(m.id in predicted_ids for m in members):
                 predicted_groups += 1
 
         remaining = max(0, total_groups - predicted_groups)
@@ -1326,7 +1670,147 @@ def predictions_run(
         trainer = Trainer(STORE_DIR)
         trainer.load()
         if trainer.clf is None:
-            return {"ok": False, "msg": "No classic model available. If you trained TF, predictions are generated automatically after training."}
+            # Fallback to TensorFlow model if available
+            try:
+                import tensorflow as tf  # type: ignore
+                model_path = STORE_DIR / "model" / "tf" / "model.keras"
+                if not model_path.exists():
+                    return {"ok": False, "msg": "No classic model available and no TF model found. Train a model first."}
+
+                st = tf_training.get_status()
+                model_id = st.model_name or "mobilenet_v2"
+                params = st.params or {}
+                input_mode = params.get("input_mode", "triplet")
+                single_role = params.get("single_role", "target")
+                class_map_raw = params.get("class_map")
+                class_to_idx = None
+                if class_map_raw:
+                    try:
+                        class_to_idx = ast.literal_eval(class_map_raw)
+                    except Exception:
+                        class_to_idx = None
+
+                # Build class mapping from DB if not available
+                if class_to_idx is None:
+                    names = [c.name for c in session.exec(select(ClassDef).order_by(ClassDef.order)).all()]
+                    class_to_idx = {name: i for i, name in enumerate(names)}
+
+                # Prepare preprocess function per model
+                def _preprocess_for_model(mid: str):
+                    mid = (mid or "").lower()
+                    if mid == "efficientnet_b0":
+                        from tensorflow.keras.applications import efficientnet as app  # type: ignore
+                        return app.preprocess_input
+                    if mid == "resnet50":
+                        from tensorflow.keras.applications import resnet50 as app  # type: ignore
+                        return app.preprocess_input
+                    from tensorflow.keras.applications import mobilenet_v2 as app  # type: ignore
+                    return app.preprocess_input
+
+                preprocess = _preprocess_for_model(model_id)
+                model = tf.keras.models.load_model(model_path)
+                try:
+                    ish = model.input_shape
+                    input_size = (int(ish[1]), int(ish[2])) if isinstance(ish, (list, tuple)) and len(ish) >= 3 else (224, 224)
+                except Exception:
+                    input_size = (224, 224)
+
+                # Group items by triplet base
+                from collections import defaultdict
+                items = session.exec(select(DatasetItem)).all()
+                pred_rows = session.exec(select(Prediction)).all()
+                already_ids = {p.item_id for p in pred_rows}
+                groups: dict[tuple[Path, str], list[DatasetItem]] = defaultdict(list)
+                for it in items:
+                    p = Path(it.path)
+                    name_lower = p.name.lower()
+                    base = None
+                    for suf in ["_target.fits", "_ref.fits", "_diff.fits"]:
+                        if name_lower.endswith(suf):
+                            base = p.name[: -len(suf)]
+                            break
+                    if base is None:
+                        continue
+                    groups[(p.parent, base)].append(it)
+
+                group_keys = list(groups.keys())
+                group_keys.sort(key=lambda k: (str(k[0]), k[1]))
+                if not repredict_all:
+                    group_keys = [k for k in group_keys if not all(m.id in already_ids for m in groups[k])]
+                if limit is not None and limit > 0:
+                    group_keys = group_keys[:limit]
+                if not group_keys:
+                    return {"ok": True, "predicted": 0}
+
+                # Build remap based on sorted unique targets
+                unique_targets = sorted(set(int(v) for v in class_to_idx.values()))
+                remap = {t: i for i, t in enumerate(unique_targets)}
+                inv_targets = {i: t for t, i in remap.items()}
+                class_names = list(class_to_idx.keys())
+
+                updated_groups = 0
+                for parent, base in group_keys:
+                    members = groups[(parent, base)]
+                    # Choose candidate path
+                    candidate = None
+                    for role_suf in ["_target.fits", "_ref.fits", "_diff.fits"]:
+                        cp = parent / f"{base}{role_suf}"
+                        if cp.exists():
+                            candidate = cp
+                            break
+                    if candidate is None:
+                        continue
+                    try:
+                        import numpy as _np  # local alias
+                        if (input_mode or "triplet").lower() == "triplet":
+                            arr = tf_training._compose_triplet_array(candidate, input_size)  # type: ignore[attr-defined]
+                        else:
+                            role = (single_role or "target").lower()
+                            rp = parent / f"{base}_{role}.fits"
+                            from .utils import safe_open_image as _safe_open_image
+                            if rp.exists():
+                                img = _safe_open_image(rp).convert("L").resize(input_size)
+                                g = _np.asarray(img, dtype=_np.float32)
+                                arr = _np.stack([g, g, g], axis=-1)
+                            else:
+                                img = _safe_open_image(candidate).convert("RGB").resize(input_size)
+                                arr = _np.asarray(img, dtype=_np.float32)
+                        x = preprocess(arr)
+                        x = _np.expand_dims(x, axis=0)
+                        pr = model.predict(x, verbose=0)[0]
+                        # Map probabilities to class names via class_to_idx and remap
+                        prob_map = {}
+                        for name, tgt in class_to_idx.items():
+                            idx = remap.get(int(tgt))
+                            if idx is not None and 0 <= idx < len(pr):
+                                prob_map[name] = float(pr[idx])
+                        pv = _np.array(list(prob_map.values()))
+                        if len(pv) > 0:
+                            order = _np.argsort(-pv)
+                            pred_lbl = list(prob_map.keys())[int(order[0])]
+                            margin = float(pv[order[0]] - pv[order[1]]) if len(pv) > 1 else float(1.0 - pv[0])
+                            maxp = float(pv[order[0]])
+                        else:
+                            pred_lbl, margin, maxp = None, None, None
+                        for m in members:
+                            existing = session.get(Prediction, m.id)
+                            if existing:
+                                existing.proba_json = json.dumps(prob_map)
+                                existing.pred_label = pred_lbl
+                                existing.margin = margin
+                                existing.max_proba = maxp
+                                existing.updated_at = dt.datetime.utcnow()
+                                session.add(existing)
+                            else:
+                                session.add(Prediction(item_id=m.id, proba_json=json.dumps(prob_map), pred_label=pred_lbl, margin=margin, max_proba=maxp))
+                        session.commit()
+                        updated_groups += 1
+                    except Exception:
+                        continue
+
+                return {"ok": True, "predicted": int(updated_groups)}
+            except Exception as e:
+                return {"ok": False, "msg": f"No classic model and TF fallback failed: {str(e)}"}
 
         # Group items by triplet base
         from collections import defaultdict
@@ -1352,7 +1836,8 @@ def predictions_run(
         # Sort deterministically by path+base
         group_keys.sort(key=lambda k: (str(k[0]), k[1]))
         if not repredict_all:
-            group_keys = [k for k in group_keys if not any(m.id in already_ids for m in groups[k])]
+            # Include groups that are not fully predicted yet (zero or partial predictions)
+            group_keys = [k for k in group_keys if not all(m.id in already_ids for m in groups[k])]
         if limit is not None and limit > 0:
             group_keys = group_keys[:limit]
         if not group_keys:
@@ -1393,8 +1878,16 @@ def predictions_run(
             pv = np.array(list(prob_map.values()))
             order = np.argsort(-pv) if len(pv) else []
             pred_lbl = classes[int(order[0])] if len(order) else None
-            margin = float(pv[0]-pv[1]) if len(pv) > 1 else (float(1.0 - pv[0]) if len(pv) == 1 else None)
-            maxp = float(pv[0]) if len(pv) else None
+            if len(pv) >= 2:
+                sorted_pv = np.sort(pv)
+                maxp = float(sorted_pv[-1])
+                margin = float(sorted_pv[-1] - sorted_pv[-2])
+            elif len(pv) == 1:
+                maxp = float(pv[0])
+                margin = float(1.0 - pv[0])
+            else:
+                maxp = None
+                margin = None
             # Write same prediction to all members
             for m in members:
                 existing = session.get(Prediction, m.id)
@@ -1945,7 +2438,8 @@ async def import_labels(file: UploadFile = File(...), session=Depends(get_sessio
 def import_folder_labeled(
     folder_path: str = Body(..., embed=True),
     class_name: str = Body(..., embed=True),
-    create_triplets: bool = Body(True, embed=True),
+    # Deprecated: create_triplets parameter retained for backward compatibility but ignored
+    create_triplets: Optional[bool] = Body(None, embed=True),
     make_thumbs: bool = Body(True, embed=True),
     extensions: Optional[str] = Body(None, embed=True),
     group_require_all: Optional[bool] = Body(None, embed=True),
@@ -1956,7 +2450,6 @@ def import_folder_labeled(
 
     - folder_path: path to a directory containing only items of the given class
     - class_name: label to apply to ingested items
-    - create_triplets: if True, attempt to build triplet thumbnails per base
     - make_thumbs: if True, generate individual thumbnails while ingesting
     - extensions: optional comma-separated list of file extensions to include
     """
@@ -1980,7 +2473,9 @@ def import_folder_labeled(
         skipped_groups = 0
         processed_groups = 0
 
-        if create_triplets:
+        # Determine ingest mode: grouped vs simple. We ignore the legacy create_triplets flag.
+        grouped_mode = group_require_all is not None or max_groups is not None
+        if grouped_mode:
             # Grouped ingest (triplet/composite) using configured roles
             from collections import defaultdict
             groups: dict[tuple[Path, str], dict[str, Path]] = defaultdict(dict)
@@ -2039,16 +2534,7 @@ def import_folder_labeled(
                         except Exception as e:
                             print(f"[warn] thumbnail failed for {canonical}: {e}")
 
-                if create_triplets:
-                    try:
-                        if set(["target", "ref", "diff"]).issubset(set(gcfg.roles)):
-                            get_or_make_triplet_thumb(roles.get("target"), roles.get("ref"), roles.get("diff"), size=256)
-                        else:
-                            from ..utils import get_or_make_composite_thumb
-                            get_or_make_composite_thumb(parent, base, size=256)
-                        triplet_built += 1
-                    except Exception as e:
-                        print(f"[warn] triplet thumb failed for {parent}/{base}: {e}")
+                # No composite generation during import; composites are built lazily or via rebuild
                 processed_groups += 1
         else:
             # Simple file-wise ingest (no grouping)
