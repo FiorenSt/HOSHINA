@@ -10,18 +10,21 @@ import os
 import threading
 import time
 
-def safe_open_image(path: Path) -> Image.Image:
+def safe_open_image(path: Path, use_zscale: bool = True, zscale_contrast: float = 0.1) -> Image.Image:
     """Open an image as a PIL Image.
 
-    For `.fits` files, always use Astropy with ZScale normalization to avoid
-    PIL's FITS plugin producing incorrect renders. For other formats, use PIL.
+    For `.fits` files, optionally use Astropy ZScale normalization with a configurable
+    contrast. If `use_zscale` is False or ZScale fails, falls back to percentile scaling.
+    For other formats, use PIL and convert to RGB.
     """
     suffix = path.suffix.lower()
     if suffix == ".fits":
         # FITS support with ZScale via astropy
         try:
             from astropy.io import fits
-            from astropy.visualization import ZScaleInterval
+            # Import ZScaleInterval lazily/conditionally to avoid unused import when disabled
+            if use_zscale:
+                from astropy.visualization import ZScaleInterval  # type: ignore
         except ImportError:
             raise ValueError(f"FITS file detected but astropy not available: {path}")
 
@@ -45,19 +48,27 @@ def safe_open_image(path: Path) -> Image.Image:
                 # Clean data
                 x = np.nan_to_num(x, nan=0.0, posinf=0.0, neginf=0.0)
 
-                # ZScale with contrast 0.1
-                try:
-                    interval = ZScaleInterval(contrast=0.1)
-                    lo, hi = interval.get_limits(x)
-
-                    if hi > lo:
-                        y = (x - lo) / (hi - lo)
-                        y = np.clip(y, 0.0, 1.0)
-                    else:
-                        # Fallback for flat images
-                        y = np.zeros_like(x)
-                except Exception:
-                    # Fallback to percentile scaling
+                # Normalize using ZScale (optional) or percentile fallback
+                y: np.ndarray
+                if use_zscale:
+                    try:
+                        interval = ZScaleInterval(contrast=float(zscale_contrast))  # type: ignore[name-defined]
+                        lo, hi = interval.get_limits(x)
+                        if hi > lo:
+                            y = (x - lo) / (hi - lo)
+                            y = np.clip(y, 0.0, 1.0)
+                        else:
+                            y = np.zeros_like(x)
+                    except Exception:
+                        # Fallback to percentile scaling
+                        p2, p98 = np.percentile(x, [2, 98])
+                        if p98 > p2:
+                            y = (x - p2) / (p98 - p2)
+                            y = np.clip(y, 0.0, 1.0)
+                        else:
+                            y = np.zeros_like(x)
+                else:
+                    # Percentile scaling when ZScale explicitly disabled
                     p2, p98 = np.percentile(x, [2, 98])
                     if p98 > p2:
                         y = (x - p2) / (p98 - p2)
@@ -143,6 +154,17 @@ def compute_file_hash(path: Path, algo: str = "sha256", chunk_size: int = 1024 *
                 break
             h.update(b)
     return h.hexdigest()
+
+
+# ===== Backward-compatibility no-ops for removed thumbnail generators =====
+def get_or_make_thumb(path: Path, size: int = 256):
+    # Thumbnails are generated on-the-fly now; keep for backward compatibility
+    return None
+
+
+def get_or_make_full_png(path: Path):
+    # Full PNG cache removed; keep for backward compatibility
+    return None
 
 # ===== Internal: bounded semaphore for generation =====
 _SEM_OBJ = None

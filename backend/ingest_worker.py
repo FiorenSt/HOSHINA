@@ -161,6 +161,10 @@ def _start_thread(params: Dict[str, object]) -> None:
             params["skip_hash"],
             params["backfill_hashes"],
         ),
+        kwargs={
+            "use_zscale": bool(params.get("use_zscale", True)),
+            "zscale_contrast": float(params.get("zscale_contrast", 0.1)),
+        },
         daemon=True,
     )
     _thread.start()
@@ -240,13 +244,19 @@ def _worker(
     batch_size: int,
     skip_hash: bool,
     backfill_hashes: bool,
+    *,
+    use_zscale: bool = True,
+    zscale_contrast: float = 0.1,
 ):
     start_ts = time.time()
     _update(
         running=True,
         data_dir=str(data_dir),
         by_groups=by_groups,
+        max_groups=max_groups,
         require_all_roles=require_all_roles,
+        total=0,
+        total_files=0,
         done=0,
         ingested=0,
         skipped=0,
@@ -266,7 +276,9 @@ def _worker(
             # total counts the number of triplet groups, not individual files
             total_groups = len(groups)
             total_files = sum(len(roles.values()) for _, roles in groups)
-            _update(total=total_groups, total_files=total_files, message=f"ingesting {total_groups} triplet groups ({total_files} files)")
+            # Clamp total to max_groups if provided so UI reflects expected cap immediately
+            display_total = min(total_groups, int(max_groups)) if (max_groups is not None) else total_groups
+            _update(total=display_total, total_files=total_files, message=f"ingesting {display_total} groups ({total_files} files)")
             last_update = start_ts
             target_ready_groups = max(1, min(120, total_groups))
             
@@ -294,7 +306,7 @@ def _worker(
                                 except Exception:
                                     c_hash = None
 
-                            img = safe_open_image(Path(rp))
+                            img = safe_open_image(Path(rp), use_zscale=use_zscale, zscale_contrast=zscale_contrast)
                             w, h = img.size
                             to_add.append(DatasetItem(path=canonical, width=w, height=h, content_hash=c_hash))
 
@@ -389,7 +401,7 @@ def _worker(
                             except Exception:
                                 c_hash = None
 
-                        img = safe_open_image(Path(f))
+                        img = safe_open_image(Path(f), use_zscale=use_zscale, zscale_contrast=zscale_contrast)
                         w, h = img.size
 
                         to_add.append(DatasetItem(path=canonical, width=w, height=h, content_hash=c_hash))
@@ -513,6 +525,9 @@ def start(
     batch_size: int = 500,
     skip_hash: bool = False,
     backfill_hashes: bool = False,
+    *,
+    use_zscale: bool = True,
+    zscale_contrast: float = 0.1,
 ):
     params: Dict[str, object] = {
         "data_dir": data_dir,
@@ -524,6 +539,8 @@ def start(
         "batch_size": int(max(1, batch_size)),
         "skip_hash": bool(skip_hash),
         "backfill_hashes": bool(backfill_hashes),
+        "use_zscale": bool(use_zscale),
+        "zscale_contrast": float(zscale_contrast),
     }
     if is_running():
         # Enqueue for later

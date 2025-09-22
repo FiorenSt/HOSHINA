@@ -86,6 +86,137 @@ function setupUI(){
     openModal('#importFolderModal');
     const st = el('#ifl-status'); if (st) { st.style.display = 'none'; st.textContent = ''; }
   });
+  // Grouping Builder state and UI
+  const groupingState = { roles: ['target','ref','diff'], suffix_map: { target: ['_target.fits'], ref: ['_ref.fits'], diff: ['_diff.fits'] }, require_all_roles: true, unit_size: 3 };
+  const gbEls = {
+    host: el('#grouping-builder'),
+    rolesHost: el('#gb-roles'),
+    preset: el('#gb-preset'),
+    addRole: el('#gb-add-role'),
+  };
+  let builderSaveTimer;
+  const getUniqueRoleName = (base) => {
+    let i = 1; let name = base;
+    while (groupingState.roles.includes(name)) { name = base + i; i += 1; }
+    return name;
+  };
+  const setGrouping = (cfg) => {
+    try {
+      groupingState.roles = Array.isArray(cfg.roles) ? cfg.roles.slice() : [];
+      groupingState.suffix_map = (cfg.suffix_map && typeof cfg.suffix_map === 'object') ? JSON.parse(JSON.stringify(cfg.suffix_map)) : {};
+      groupingState.require_all_roles = !!cfg.require_all_roles;
+      groupingState.unit_size = groupingState.roles.length || 1;
+    } catch(_){ }
+  };
+  const currentGroupingAsJson = () => ({ roles: groupingState.roles.slice(), suffix_map: JSON.parse(JSON.stringify(groupingState.suffix_map || {})), require_all_roles: !!groupingState.require_all_roles, unit_size: groupingState.unit_size });
+  const scheduleBuilderSave = () => {
+    clearTimeout(builderSaveTimer);
+    builderSaveTimer = setTimeout(async () => { await autoSaveGroupingConfig(); }, 400);
+  };
+  const saveGroupingNow = async () => {
+    try {
+      if (!gbEls.host) return; // builder not present
+      // Ensure at least one role exists
+      if (!Array.isArray(groupingState.roles) || groupingState.roles.length === 0){
+        const fallback = 'image';
+        groupingState.roles = [fallback];
+        groupingState.suffix_map = { [fallback]: ['_image'] };
+        groupingState.unit_size = 1;
+      }
+      const payload = currentGroupingAsJson();
+      await api('/grouping', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(payload) });
+    } catch(_){ }
+  };
+  const syncTextareaFromBuilder = () => {
+    // No visible textarea anymore; just trigger auto-save
+    scheduleBuilderSave();
+  };
+  const renderGroupingRoles = () => {
+    if (!gbEls.rolesHost) return;
+    const host = gbEls.rolesHost; host.innerHTML = '';
+    groupingState.roles.forEach((roleName, idx) => {
+      const row = document.createElement('div');
+      row.className = 'gb-role';
+      row.style.display = 'grid';
+      row.style.gridTemplateColumns = '1fr 1fr auto';
+      row.style.gap = '8px';
+      const cur = groupingState.suffix_map[roleName];
+      const single = Array.isArray(cur) && cur.length ? cur[0] : `_${roleName}.fits`;
+      row.innerHTML = `
+        <label>Role <input type="text" value="${roleName}" data-gb-role-name style="width:100%;"></label>
+        <label>Suffix <input type="text" value="${single}" data-gb-suffix-single style="width:100%;" placeholder="e.g., _${roleName}.fits"></label>
+        <div style="display:flex; align-items:center; justify-content:flex-end;">
+          <button class="secondary-btn" data-gb-remove-role title="Remove role" ${groupingState.roles.length <= 1 ? 'disabled' : ''}>🗑️</button>
+        </div>`;
+      row.querySelector('[data-gb-suffix-single]').addEventListener('input', (e) => {
+        const v = String(e.target.value || '').trim();
+        groupingState.suffix_map[roleName] = [v];
+        syncTextareaFromBuilder();
+      });
+      // Role name and remove handlers
+      row.querySelector('[data-gb-role-name]').addEventListener('change', (e) => {
+        const newName = String(e.target.value || '').trim() || roleName;
+        if (newName === roleName) return;
+        // rename role
+        groupingState.roles[idx] = newName;
+        const cur = groupingState.suffix_map[roleName] || [];
+        delete groupingState.suffix_map[roleName];
+        groupingState.suffix_map[newName] = cur;
+        // keep unit_size aligned with number of roles
+        groupingState.unit_size = groupingState.roles.length;
+        renderGroupingRoles();
+        syncTextareaFromBuilder();
+      });
+      row.querySelector('[data-gb-remove-role]').addEventListener('click', () => {
+        if (groupingState.roles.length <= 1) return;
+        groupingState.roles.splice(idx, 1);
+        delete groupingState.suffix_map[roleName];
+        groupingState.unit_size = Math.max(1, groupingState.roles.length || 1);
+        renderGroupingRoles();
+        syncTextareaFromBuilder();
+      });
+      host.appendChild(row);
+    });
+  };
+  const applyPreset = (preset) => {
+    if (preset === 'single') {
+      setGrouping({ roles: ['image'], suffix_map: { image: ['_image'] }, require_all_roles: groupingState.require_all_roles, unit_size: 1 });
+    } else if (preset === 'pair') {
+      setGrouping({ roles: ['a','b'], suffix_map: { a: ['_a'], b: ['_b'] }, require_all_roles: groupingState.require_all_roles, unit_size: 2 });
+    } else if (preset === 'triplet') {
+      setGrouping({ roles: ['target','ref','diff'], suffix_map: { target: ['_target.fits'], ref: ['_ref.fits'], diff: ['_diff.fits'] }, require_all_roles: groupingState.require_all_roles, unit_size: 3 });
+    } else if (preset === 'quad') {
+      setGrouping({ roles: ['a','b','c','d'], suffix_map: { a: ['_a'], b: ['_b'], c: ['_c'], d: ['_d'] }, require_all_roles: groupingState.require_all_roles, unit_size: 4 });
+    }
+    renderGroupingRoles();
+    syncTextareaFromBuilder();
+  };
+  const initGroupingBuilder = (cfg) => {
+    if (!gbEls.host) return; // builder not present
+    const initial = cfg ? { roles: cfg.roles, suffix_map: cfg.suffix_map, require_all_roles: cfg.require_all_roles, unit_size: cfg.unit_size } : null;
+    if (initial) setGrouping(initial);
+    renderGroupingRoles();
+    // Wire controls
+    if (gbEls.preset) {
+      gbEls.preset.addEventListener('change', (e) => {
+        const v = String(e.target.value || 'custom');
+        if (v !== 'custom') applyPreset(v);
+      });
+    }
+    if (gbEls.addRole) {
+      gbEls.addRole.addEventListener('click', () => {
+        const name = getUniqueRoleName('role');
+        groupingState.roles.push(name);
+        groupingState.suffix_map[name] = ['_' + name];
+        groupingState.unit_size = groupingState.roles.length;
+        renderGroupingRoles();
+        syncTextareaFromBuilder();
+        if (gbEls.preset) gbEls.preset.value = 'custom';
+      });
+    }
+    // Initial sync to textarea so both are aligned
+    syncTextareaFromBuilder();
+  };
   // Bulk assign modal handlers
   addListener('#bulkAssignClose', 'click', () => closeModal('#bulkAssignModal'));
   addListener('#bulk-assign-by-threshold', 'click', async () => {
@@ -157,19 +288,19 @@ function setupUI(){
   const loadGroupingConfig = async () => {
     try {
       const g = await api('/grouping');
-      const ta = el('#grouping-json'); 
-      if (ta) ta.value = JSON.stringify({ roles: g.roles, suffix_map: g.suffix_map, require_all_roles: g.require_all_roles, unit_size: g.unit_size }, null, 2);
+      // Initialize builder from server config
+      initGroupingBuilder({ roles: g.roles, suffix_map: g.suffix_map, require_all_roles: g.require_all_roles, unit_size: g.unit_size });
     } catch (e) {
       console.warn('Failed to load grouping config:', e);
+      // Fallback: initialize builder with defaults
+      initGroupingBuilder(null);
     }
   };
   
-  // Auto-save grouping config when user modifies it
+  // Auto-save grouping config when user modifies it (from builder state)
   const autoSaveGroupingConfig = async () => {
-    const ta = el('#grouping-json'); if (!ta) return;
-    let payload;
-    try { payload = JSON.parse(ta.value); } catch(e) { return; } // Invalid JSON, don't save
     try {
+      const payload = currentGroupingAsJson();
       await api('/grouping', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(payload) });
     } catch(e){ console.warn('Failed to auto-save grouping config:', e); }
   };
@@ -177,15 +308,7 @@ function setupUI(){
   // Load config on page load
   loadGroupingConfig();
   
-  // Auto-save on textarea change (debounced)
-  const ta = el('#grouping-json');
-  if (ta) {
-    let saveTimeout;
-    ta.addEventListener('input', () => {
-      clearTimeout(saveTimeout);
-      saveTimeout = setTimeout(autoSaveGroupingConfig, 1000); // Save 1 second after user stops typing
-    });
-  }
+  // No textarea listener needed now; builder change handlers schedule auto-save
   // Start Fresh handler
   addListener('#start-fresh', 'click', async () => {
     if (!confirm('This will completely wipe all data, labels, predictions, embeddings, and caches.\n\nYou will need to ingest data again after this.\n\nProceed?')) return;
@@ -316,36 +439,45 @@ function setupUI(){
   });
   addListener('#single-prev', 'click', () => { if (state.mode === 'single' && typeof navigateSingle === 'function') navigateSingle(-1); });
   addListener('#single-next', 'click', () => { if (state.mode === 'single' && typeof navigateSingle === 'function') navigateSingle(1); });
-  // Data directory controls - separate Set Directory and Ingest buttons
-  addListener('#apply-data-dir', 'click', async () => {
-    const inp = el('#data-dir-input');
-    if (!inp) return;
-    const val = inp.value.trim();
-    if (!val) { status('Please enter a folder path'); return; }
-    try {
-      status('Setting data directory...');
-      const body = { data_dir: val, ingest: false };
-      const res = await api('/set-data-dir', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
-      const cur = el('#data-dir-current'); if (cur) cur.textContent = `Current: ${res.data_dir}`;
-      status('Data directory updated');
-    } catch (e) {
-      status('Failed to update data directory');
-    }
-  });
-  
+  // Data directory controls - Ingest only
   addListener('#ingest-data-dir', 'click', async () => {
     const inp = el('#data-dir-input');
     if (!inp) return;
     const val = inp.value.trim();
     if (!val) { status('Please enter a folder path'); return; }
     try {
+      // If another ingest is running, offer to cancel before starting a new one
+      try {
+        const ist = await api('/ingest/status');
+        if (ist && ist.ok && ist.running) {
+          const doCancel = confirm('Another ingest is currently running. Cancel it and start a new one?');
+          if (!doCancel) { status('Existing ingest still running; new ingest not started.'); return; }
+          await api('/ingest/cancel', { method: 'POST' });
+          // Small wait to let the worker stop
+          await new Promise(r=>setTimeout(r, 300));
+        }
+      } catch(_){ }
+      // Persist latest grouping config before starting ingest to avoid race conditions
+      await saveGroupingNow();
       const maxGroupsVal = (el('#apply-max-groups')?.value || '').trim();
       const maxGroups = maxGroupsVal ? parseInt(maxGroupsVal, 10) : null;
       const requireAll = !!el('#apply-require-all')?.checked;
       status('Ingesting data...');
 
       // Start async ingest with progress reporting
-      const startBody = { data_dir: val, by_groups: !!(maxGroups && maxGroups > 0), max_groups: maxGroups, require_all_roles: requireAll };
+      const useZ = !!el('#ingest-use-zscale')?.checked;
+      const zcStr = (el('#ingest-zscale-contrast')?.value || '').trim();
+      const zcVal = zcStr ? parseFloat(zcStr) : 0.1;
+      const startBody = {
+        data_dir: val,
+        by_groups: !!(maxGroups && maxGroups > 0),
+        max_groups: maxGroups,
+        require_all_roles: requireAll,
+        use_zscale: useZ,
+        zscale_contrast: isFinite(zcVal) ? zcVal : 0.1,
+      };
+      const extVal = (el('#extensions-input')?.value || '').trim();
+      if (extVal) startBody.extensions = extVal;
       const start = await api('/ingest/start', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(startBody) });
       if (!start.ok) { status(start.msg || 'Failed to start ingest'); return; }
       if (start.queued) {
@@ -374,7 +506,7 @@ function setupUI(){
         }
         
         // Show appropriate units; clarify that files count refers to DB ingestion, not thumbnail creation
-        const unitLabel = st.by_groups ? 'triplets' : 'files';
+        const unitLabel = st.by_groups ? 'groups' : 'files';
         const progressInfo = st.by_groups && totalFiles ? 
           `${done}/${total} ${unitLabel} • files ${st.ingested || 0}/${totalFiles} (${pct}%)` :
           `${done}/${total} ${unitLabel} (${pct}%)`;
@@ -576,8 +708,23 @@ function setupUI(){
         }).catch(()=>{});
         await advanceSingleNext();
       } else {
-        if (state.selectedItems.size > 0) await batchLabelItems(Array.from(state.selectedItems), state.keyMap[k], false, false);
-        else await labelItems([first.id], state.keyMap[k], false, false);
+        if (state.selectedItems.size > 0) {
+          await batchLabelItems(Array.from(state.selectedItems), state.keyMap[k], false, false);
+        } else {
+          // Assign entire visible page to the chosen class (triplet-aware)
+          const groups = Array.isArray(state.groups) ? state.groups : [];
+          const allIds = groups.flatMap(g => g && Array.isArray(g.memberIds) ? g.memberIds : []).filter(Boolean);
+          if (allIds.length > 0){
+            const groupCount = groups.length || 0;
+            const clsName = state.keyMap[k];
+            const ok = confirm(`Assign ALL ${groupCount} triplets on this page to ${clsName}?`);
+            if (!ok) return;
+            await batchLabelItems(allIds, clsName, false, false);
+          } else {
+            // Fallback to first item if groups are not available
+            await labelItems([first.id], state.keyMap[k], false, false);
+          }
+        }
       }
     }
     else if(k==='0'){
@@ -846,7 +993,8 @@ function setupCategoryDropdowns() {
     }
   });
   window.addEventListener('resize', () => closeOpenOverlay());
-  window.addEventListener('scroll', () => closeOpenOverlay(), true);
+  // Removed scroll-based close to prevent immediate dropdown dismissal when interacting inside
+  // window.addEventListener('scroll', () => closeOpenOverlay());
 }
 
 (async function(){

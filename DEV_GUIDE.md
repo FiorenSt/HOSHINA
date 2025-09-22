@@ -5,9 +5,8 @@ This guide shows how to run HOSHINA for development on Windows using PowerShell.
 ### 1) Prerequisites
 - Python 3.9+
 - PowerShell
-- Optional (recommended for performance/features):
+- Optional (recommended for features):
   - Astropy for FITS preview: `pip install astropy`
-  - TensorFlow CPU (Windows AMD64): `pip install tensorflow-cpu`
 
 ### 2) Clone and enter project
 ```powershell
@@ -26,8 +25,8 @@ pip install --upgrade pip; pip install -r requirements.txt;
 Point `AL_DATA_DIR` to a folder with your images (JPG/PNG/TIFF/FITS). The app does not copy files; it references them by path.
 ```powershell
 $env:AL_DATA_DIR = "C:\Users\fiore\Desktop\active_labeler_app\ATLAS_TRANSIENTS";
-python .\scripts\ingest.py --data-dir $env:AL_DATA_DIR;
-python .\scripts\setup_classes.py;
+python -m backend.cli.ingest --data-dir $env:AL_DATA_DIR;
+python -m backend.cli.setup_classes;
 ```
 
 ### 5) Run the development server

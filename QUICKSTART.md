@@ -20,10 +20,10 @@ pip install torch torchvision
 set AL_DATA_DIR=C:\Users\fiore\Desktop\active_labeler_app\ATLAS_TRANSIENTS
 
 # Ingest your images (supports JPG, PNG, TIFF, FITS)
-python scripts/ingest.py --data-dir %AL_DATA_DIR%
+python -m backend.cli.ingest --data-dir %AL_DATA_DIR%
 
 # Set up default classes (you can customize these later)
-python scripts/setup_classes.py
+python -m backend.cli.setup_classes
 ```
 
 ### 3. Run the Application

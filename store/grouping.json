@@ -1,0 +1,20 @@
+{
+  "roles": [
+    "target",
+    "ref",
+    "diff"
+  ],
+  "suffix_map": {
+    "target": [
+      "_science.png"
+    ],
+    "ref": [
+      "_template.png"
+    ],
+    "diff": [
+      "_diff.png"
+    ]
+  },
+  "require_all_roles": true,
+  "unit_size": 3
+}

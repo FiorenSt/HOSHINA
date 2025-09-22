@@ -1208,7 +1208,20 @@ function setupUI(){
       if (state.selectedItems.size > 0) {
         await batchLabelItems(Array.from(state.selectedItems), state.keyMap[k], false, false);
       } else {
-        await labelItems([first.id], state.keyMap[k], false, false);
+        // Legacy bundle lacks triplet grouping; fall back to assigning all visible tiles if possible
+        try {
+          const tiles = Array.from(document.querySelectorAll('#grid .tile'));
+          const allIds = tiles.map(n => parseInt(n.dataset.id)).filter(Boolean);
+          if (Array.isArray(allIds) && allIds.length > 1){
+            const ok = confirm(`Assign ALL ${allIds.length} items on this page to ${state.keyMap[k]}?`);
+            if (!ok) return;
+            await batchLabelItems(allIds, state.keyMap[k], false, false);
+          } else {
+            await labelItems([first.id], state.keyMap[k], false, false);
+          }
+        } catch(_){
+          await labelItems([first.id], state.keyMap[k], false, false);
+        }
       }
     }
     // Unsure (0)

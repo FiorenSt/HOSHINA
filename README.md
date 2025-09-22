@@ -43,7 +43,7 @@ pip install astropy
 4) **Ingest** your images into the SQLite database and generate thumbnails:
 
 ```bash
-python scripts/ingest.py --data-dir /data/my_images
+python -m backend.cli.ingest --data-dir /data/my_images
 ```
 
 5) **Run the server**:

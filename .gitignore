@@ -5,6 +5,7 @@
 *.fits
 ATLAS_TRANSIENTS/
 Good_obj/
+DATA_LSST/
 store/app.db
 store/cache/
 store/model/

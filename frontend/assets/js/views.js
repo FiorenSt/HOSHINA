@@ -72,7 +72,12 @@ function showImageZoom(itemId){
     const hasAny = trip.items && (trip.items.target || trip.items.ref || trip.items.diff);
     if (!hasAny){
       if (three) three.style.display = 'none';
-      if (single) { single.style.display = 'block'; single.src = `/api/file/${itemId}`; }
+      if (single) {
+        single.style.display = 'block';
+        const pathLower = (item && item.path ? String(item.path) : '').toLowerCase();
+        const isFits = /\.(fits|fit|fits\.fz|fz)$/.test(pathLower);
+        single.src = isFits ? `/api/file/${itemId}` : `/api/thumb/${itemId}?size=1024`;
+      }
       openModal('#imageModal');
       return;
     }
@@ -112,7 +117,12 @@ function showImageZoom(itemId){
     openModal('#imageModal');
   }).catch(()=>{
     if (three) three.style.display = 'none';
-    if (single) { single.style.display = 'block'; single.src = `/api/file/${itemId}`; }
+    if (single) {
+      single.style.display = 'block';
+      const pathLower = (item && item.path ? String(item.path) : '').toLowerCase();
+      const isFits = /\.(fits|fit|fits\.fz|fz)$/.test(pathLower);
+      single.src = isFits ? `/api/file/${itemId}` : `/api/thumb/${itemId}?size=1024`;
+    }
     openModal('#imageModal');
   });
 }
@@ -694,7 +704,11 @@ async function renderSingleView(){
       imgHost.innerHTML = '<img id="single-img" style="max-width:100%; max-height: 80vh; object-fit: contain;" />';
     }
     const img = el('#single-img');
-    if (img) img.src = `/api/file/${baseId}`;
+    if (img) {
+      const pathLower = (item && item.path ? String(item.path) : '').toLowerCase();
+      const isFits = /\.(fits|fit|fits\.fz|fz)$/.test(pathLower);
+      img.src = isFits ? `/api/file/${baseId}` : `/api/thumb/${baseId}?size=1600`;
+    }
   } catch(_){ }
 
   // Fetch triplet in background; only render if still on same item

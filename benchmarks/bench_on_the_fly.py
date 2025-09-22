@@ -1,18 +1,18 @@
+#!/usr/bin/env python3
 import argparse
 import statistics
 import time
 from pathlib import Path
 from typing import List, Tuple
 import concurrent.futures as futures
+
 import sys
-
-import numpy as np
-from PIL import Image
-
-# Ensure project root is on sys.path for 'backend' imports when run as a script
 ROOT_DIR = Path(__file__).resolve().parents[1]
 if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
+
+import numpy as np
+from PIL import Image
 
 from backend.db import Session, engine, DatasetItem
 from backend.utils import safe_open_image
@@ -50,23 +50,6 @@ def compose_triplet(target: Path, ref: Path, diff: Path, size: int = 256) -> Ima
     return out
 
 
-def find_triplet_paths(base_path: Path) -> Tuple[Path, Path, Path]:
-    name_lower = base_path.name.lower()
-    base = None
-    for suf in ["_target.fits", "_ref.fits", "_diff.fits"]:
-        if name_lower.endswith(suf):
-            base = base_path.name[: -len(suf)]
-            break
-    if base is None:
-        base = base_path.stem
-    parent = base_path.parent
-    return (
-        parent / f"{base}_target.fits",
-        parent / f"{base}_ref.fits",
-        parent / f"{base}_diff.fits",
-    )
-
-
 def summarize(name: str, timings_ms: List[float]) -> None:
     if not timings_ms:
         print(f"{name}: no samples")
@@ -91,7 +74,6 @@ def main():
     with Session(engine) as session:
         items = session.query(DatasetItem).all()
 
-    # Group by base triplet
     from collections import defaultdict
 
     groups: dict[Tuple[Path, str], List[DatasetItem]] = defaultdict(list)
@@ -117,39 +99,28 @@ def main():
         ref = parent / f"{base}_ref.fits"
         diff = parent / f"{base}_diff.fits"
 
-        # Warmups
         for _ in range(args.warmups):
             for p in [target, ref, diff]:
                 if p.exists():
                     _ = safe_open_image(p)
             _ = compose_triplet(target, ref, diff, size=args.size)
 
-        # Measured singles
         for p in [target, ref, diff]:
             if not p.exists():
                 continue
             ts = time_fn(lambda: safe_open_image(p), repeats=args.repeats)
             single_timings.extend(ts)
 
-        # Measured triplet compose
         tt = time_fn(lambda: compose_triplet(target, ref, diff, size=args.size), repeats=args.repeats)
         triplet_timings.extend(tt)
 
     summarize("single_from_fits", single_timings)
     summarize("triplet_compose", triplet_timings)
 
-    # Grid simulation: concurrently compose many triplets and measure wall time
     if args.grid and len(keys) > 0:
-        # Build a list of triplet tuples
         triplets: List[Tuple[Path, Path, Path]] = []
         for parent, base in keys:
-            triplets.append(
-                (
-                    parent / f"{base}_target.fits",
-                    parent / f"{base}_ref.fits",
-                    parent / f"{base}_diff.fits",
-                )
-            )
+            triplets.append((parent / f"{base}_target.fits", parent / f"{base}_ref.fits", parent / f"{base}_diff.fits"))
         triplets = triplets[: args.grid]
 
         def task(tup: Tuple[Path, Path, Path]):
